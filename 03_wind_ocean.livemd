@@ -1,0 +1,246 @@
+# Notebook 03 — Wind & Ocean Energy
+<!-- livebook:{"persist_outputs":true} -->
+
+# 🌬️ EnergyX — Notebook 03
+## Wind, Wave, Tidal & OTEC
+
+```elixir
+Mix.install([
+  {:energyx, "~> 1.0"},
+  {:kino, "~> 0.12"},
+  {:kino_vega_lite, "~> 0.1"},
+  {:vega_lite, "~> 0.1"}
+])
+alias VegaLite, as: Vl
+```
+
+---
+
+## 1. Wind Turbine Power Curve
+
+```elixir
+d_input   = Kino.Input.number("Rotor Diameter (m)",   default: 120)
+pr_input  = Kino.Input.number("Rated Power (kW)",     default: 3500)
+vin_input = Kino.Input.number("Cut-in Speed (m/s)",   default: 3.0)
+vr_input  = Kino.Input.number("Rated Speed (m/s)",    default: 12.0)
+vo_input  = Kino.Input.number("Cut-out Speed (m/s)",  default: 25.0)
+cp_input  = Kino.Input.number("Power Coefficient Cp", default: 0.46)
+Kino.Layout.grid([d_input, pr_input, vin_input, vr_input, vo_input, cp_input], columns: 3)
+```
+
+```elixir
+d    = Kino.Input.read(d_input)
+pr   = Kino.Input.read(pr_input)
+vin  = Kino.Input.read(vin_input)
+vr   = Kino.Input.read(vr_input)
+vo   = Kino.Input.read(vo_input)
+cp   = Kino.Input.read(cp_input)
+
+# Power curve
+curve = EnergyX.Renewable.Wind.power_curve(%{
+  rated_power_kw: pr, v_cut_in: vin, v_rated: vr, v_cut_out: vo,
+  v_range: Enum.map(0..300, & &1 / 10.0)
+})
+
+# Actual turbine physics at rated wind speed
+phys = EnergyX.Renewable.Wind.turbine_power(%{wind_speed: vr * 1.0, rotor_diameter: d * 1.0, cp: cp})
+betz = EnergyX.Renewable.Wind.betz_limit()
+
+IO.puts("""
+Wind Turbine: D=#{d}m, Rated=#{pr} kW
+  Swept area:       #{phys.swept_area_m2} m²
+  Physics at v=#{vr} m/s: #{Float.round(phys.power_kw, 1)} kW
+  Cp/Cp_max (Betz): #{phys.cp_to_betz_ratio} (Betz limit = #{betz.cp_max})
+""")
+
+Vl.new(width: 650, height: 330, title: "Wind Turbine Power Curve (#{d}m rotor)")
+|> Vl.data_from_values(curve.curve)
+|> Vl.mark(:area, color: "#2E75B6", opacity: 0.6, line: %{color: "#1F4E79", stroke_width: 2})
+|> Vl.encode_field(:x, "wind_speed_m_s", type: :quantitative, title: "Wind Speed (m/s)")
+|> Vl.encode_field(:y, "power_kw", type: :quantitative, title: "Power (kW)")
+|> Kino.VegaLite.new()
+```
+
+---
+
+## 2. Weibull Wind Distribution & AEP
+
+```elixir
+k_input = Kino.Input.number("Weibull k (shape)", default: 2.0)
+c_input = Kino.Input.number("Weibull c (scale, m/s)", default: 9.0)
+av_input= Kino.Input.number("Availability (%)", default: 97.0)
+Kino.Layout.grid([k_input, c_input, av_input], columns: 3)
+```
+
+```elixir
+k  = Kino.Input.read(k_input)
+c  = Kino.Input.read(c_input)
+av = Kino.Input.read(av_input) / 100.0
+
+aep = EnergyX.Renewable.Wind.aep_weibull(%{
+  rated_power_kw: pr, v_cut_in: vin, v_rated: vr, v_cut_out: vo,
+  weibull_k: k, weibull_c: c, availability: av
+})
+
+weibull_data =
+  Enum.map(0..300, fn i ->
+    v = i / 10.0
+    pdf  = EnergyX.Renewable.Wind.weibull_pdf(v, k, c)
+    power = cond do
+      v < vin or v > vo -> 0.0
+      v >= vr  -> pr
+      true     -> pr * :math.pow((v - vin) / (vr - vin), 3)
+    end
+    %{"Speed (m/s)" => v, "Probability Density" => pdf, "Power (kW/1000)" => power / 1000.0}
+  end)
+
+IO.puts("""
+Annual Energy Production (AEP):
+  k=#{k}, c=#{c} m/s, availability=#{av*100}%
+  AEP = #{aep.aep_mwh} MWh/yr
+  Capacity Factor = #{aep.capacity_factor_pct}%
+""")
+
+Vl.new(width: 650, height: 320, title: "Weibull Wind Distribution & Power Curve Overlay")
+|> Vl.data_from_values(weibull_data)
+|> Vl.layers([
+  Vl.new() |> Vl.mark(:area, color: "#00B0F0", opacity: 0.55)
+    |> Vl.encode_field(:x, "Speed (m/s)", type: :quantitative)
+    |> Vl.encode_field(:y, "Probability Density", type: :quantitative),
+  Vl.new() |> Vl.mark(:line, color: "#C00000", stroke_width: 2)
+    |> Vl.encode_field(:x, "Speed (m/s)", type: :quantitative)
+    |> Vl.encode_field(:y, "Power (kW/1000)", type: :quantitative)
+])
+|> Kino.VegaLite.new()
+```
+
+---
+
+## 3. Wind Shear — Height Extrapolation
+
+```elixir
+v_ref  = 8.5   # m/s at 10m
+h_ref  = 10.0  # m
+
+shear_data =
+  Enum.map(10..200//5, fn h ->
+    power_law = EnergyX.Renewable.Wind.wind_shear_power_law(%{
+                  v_ref: v_ref, h_ref: h_ref, h_target: h * 1.0, alpha: 0.143})
+    log_law   = EnergyX.Renewable.Wind.wind_shear_log(%{
+                  v_ref: v_ref, h_ref: h_ref, h_target: h * 1.0, z0: 0.03})
+    %{"Height (m)"        => h,
+      "Power Law (m/s)"  => power_law.wind_speed_at_h,
+      "Log Law (m/s)"    => log_law.wind_speed_at_h}
+  end)
+
+Vl.new(width: 550, height: 380, title: "Wind Shear — Speed vs Hub Height")
+|> Vl.data_from_values(shear_data)
+|> Vl.transform(fold: ["Power Law (m/s)", "Log Law (m/s)"], as: ["Model", "Wind Speed (m/s)"])
+|> Vl.mark(:line, stroke_width: 2)
+|> Vl.encode_field(:x, "Wind Speed (m/s)", type: :quantitative)
+|> Vl.encode_field(:y, "Height (m)", type: :quantitative)
+|> Vl.encode_field(:color, "Model", type: :nominal)
+|> Kino.VegaLite.new()
+```
+
+---
+
+## 4. Jensen Wake Model — Turbine Array
+
+```elixir
+v_wind = 10.0; ct = 0.80; d_rotor = 100.0
+
+wake_data =
+  Enum.map(1..20, fn n ->
+    x = n * d_rotor
+    wake = EnergyX.Renewable.Wind.jensen_wake(%{v_inf: v_wind, ct: ct, d: d_rotor, x: x})
+    %{"Downstream Distance (D)" => n, "Wake Speed (m/s)" => wake.wake_wind_speed,
+      "Power Ratio" => wake.power_ratio, "Deficit (%)" => wake.deficit_pct}
+  end)
+
+Vl.new(width: 600, height: 300, title: "Jensen Wake Model — Speed Deficit vs Downstream Distance")
+|> Vl.data_from_values(wake_data)
+|> Vl.mark(:line, color: "#2E75B6", stroke_width: 2.5, point: true)
+|> Vl.encode_field(:x, "Downstream Distance (D)", type: :quantitative,
+                   title: "Downstream distance (rotor diameters)")
+|> Vl.encode_field(:y, "Wake Speed (m/s)", type: :quantitative)
+|> Kino.VegaLite.new()
+```
+
+---
+
+## 5. Wave Energy — Power Density
+
+```elixir
+wave_data =
+  for te <- [6, 8, 10, 12, 14], hs <- Enum.map(1..30, & &1 * 0.2) do
+    pw = EnergyX.Renewable.WaveTidalOTEC.wave_power_per_meter(%{h_s: hs, t_e: te * 1.0})
+    %{"Hs (m)" => Float.round(hs, 1), "J (kW/m)" => pw.wave_power_kw_per_m, "Te" => "Te=#{te}s"}
+  end
+
+Vl.new(width: 650, height: 340, title: "Wave Power Density vs Significant Wave Height")
+|> Vl.data_from_values(wave_data)
+|> Vl.mark(:line, stroke_width: 2)
+|> Vl.encode_field(:x, "Hs (m)", type: :quantitative, title: "Significant wave height Hs (m)")
+|> Vl.encode_field(:y, "J (kW/m)", type: :quantitative, title: "Wave power J (kW/m)")
+|> Vl.encode_field(:color, "Te", type: :nominal)
+|> Kino.VegaLite.new()
+```
+
+---
+
+## 6. Tidal Stream Power & OTEC
+
+```elixir
+# Tidal turbine array
+tidal_data =
+  Enum.map(0..50, fn i ->
+    v = i / 10.0
+    p = EnergyX.Renewable.WaveTidalOTEC.tidal_stream_power(%{
+          tidal_speed: v, rotor_diameter: 18.0, cp: 0.42})
+    %{"Tidal Speed (m/s)" => v, "Power (kW)" => p.power_kw}
+  end)
+
+Vl.new(width: 600, height: 300, title: "Tidal Turbine Power Curve (D=18m, Cp=0.42)")
+|> Vl.data_from_values(tidal_data)
+|> Vl.mark(:area, color: "#548235", opacity: 0.7, line: true)
+|> Vl.encode_field(:x, "Tidal Speed (m/s)", type: :quantitative)
+|> Vl.encode_field(:y, "Power (kW)", type: :quantitative)
+|> Kino.VegaLite.new()
+```
+
+```elixir
+# OTEC efficiency across temperature differences
+otec_data =
+  Enum.map(10..30, fn dt ->
+    otec = EnergyX.Renewable.WaveTidalOTEC.otec_efficiency(%{
+             t_surface_c: 28.0, t_deep_c: 28.0 - dt, eta_fraction: 0.72})
+    %{"ΔT (°C)" => dt, "Gross η (%)" => Float.round(otec.eta_gross * 100, 3),
+      "Net η (%)" => Float.round(otec.eta_net * 100, 3)}
+  end)
+
+Vl.new(width: 600, height: 280, title: "OTEC Efficiency vs Ocean Temperature Difference")
+|> Vl.data_from_values(otec_data)
+|> Vl.transform(fold: ["Gross η (%)", "Net η (%)"], as: ["Basis", "Efficiency (%)"])
+|> Vl.mark(:line, stroke_width: 2)
+|> Vl.encode_field(:x, "ΔT (°C)", type: :quantitative)
+|> Vl.encode_field(:y, "Efficiency (%)", type: :quantitative)
+|> Vl.encode_field(:color, "Basis", type: :nominal)
+|> Kino.VegaLite.new()
+```
+
+---
+
+## 7. Global Wave Resource Atlas
+
+```elixir
+atlas = EnergyX.Renewable.WaveTidalOTEC.wave_resource_atlas()
+IO.puts("Global Wave Power Resource (kW/m of wavefront):")
+atlas |> Enum.sort_by(fn {_,v} -> -v.typical_kw_m end) |> Enum.each(fn {region, data} ->
+  IO.puts("  #{region}: #{data.typical_kw_m} kW/m typical (#{data.best_kw_m} kW/m peak)")
+end)
+```
+
+---
+
+*📘 Continue to Notebook 04 — Fossil Fuels & Nuclear*

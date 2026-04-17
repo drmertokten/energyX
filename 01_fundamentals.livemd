@@ -1,0 +1,287 @@
+# Notebook 01 — Thermodynamics & Thermal-Fluid Fundamentals
+<!-- livebook:{"persist_outputs":true} -->
+
+# ⚡ EnergyX — Notebook 01
+## Thermodynamics, Heat Transfer, Fluid Mechanics & Dimensionless Numbers
+
+```elixir
+Mix.install([
+  {:energyx,        "~> 1.0"},
+  {:kino,           "~> 0.12"},
+  {:kino_vega_lite, "~> 0.1"},
+  {:vega_lite,      "~> 0.1"}
+])
+alias VegaLite, as: Vl
+```
+
+---
+
+## 1. Thermodynamic Cycle Efficiencies
+
+```elixir
+# ── Input widgets ───────────────────────────────────────────────────────────
+t_hot_input  = Kino.Input.number("Hot source temperature (°C)", default: 600)
+t_cold_input = Kino.Input.number("Cold sink temperature (°C)",  default: 30)
+rp_input     = Kino.Input.number("Brayton pressure ratio",      default: 20)
+Kino.Layout.grid([t_hot_input, t_cold_input, rp_input], columns: 3)
+```
+
+```elixir
+t_hot  = Kino.Input.read(t_hot_input)
+t_cold = Kino.Input.read(t_cold_input)
+rp     = Kino.Input.read(rp_input)
+
+carnot  = EnergyX.Thermal.Thermodynamics.carnot_efficiency(t_hot + 273.15, t_cold + 273.15)
+brayton = EnergyX.Thermal.Thermodynamics.brayton_efficiency(%{pressure_ratio: rp})
+rankine = EnergyX.Thermal.Thermodynamics.rankine_efficiency(%{t_boiler_c: t_hot, t_condenser_c: t_cold})
+ccgt    = EnergyX.Thermal.Thermodynamics.combined_cycle_efficiency(brayton.eta_brayton, rankine.eta_rankine_approx)
+
+IO.puts("""
+╔══════════════════════════════════════════════════════╗
+║    THERMODYNAMIC CYCLE COMPARISON
+╠══════════════════════════════════════════════════════╣
+║  Carnot (maximum possible):    #{Float.round(carnot.eta_pct, 2)}%
+║  Brayton gas turbine (rp=#{rp}):   #{Float.round(brayton.eta_pct, 2)}%
+║  Rankine steam cycle:          #{Float.round(rankine.eta_pct, 2)}%
+║  Combined cycle (CCGT):        #{Float.round(ccgt.eta_pct, 2)}%
+╚══════════════════════════════════════════════════════╝
+""")
+```
+
+```elixir
+# Efficiency vs hot temperature (Carnot, Brayton, Rankine)
+data =
+  Enum.map(200..900//20, fn t ->
+    th_k = t + 273.15
+    tc_k = t_cold + 273.15
+    c = 1 - tc_k / th_k
+    b = EnergyX.Thermal.Thermodynamics.brayton_efficiency(%{pressure_ratio: rp}).eta_brayton
+    r = EnergyX.Thermal.Thermodynamics.rankine_efficiency(%{t_boiler_c: t, t_condenser_c: t_cold}).eta_rankine_approx
+    %{"T_hot (°C)" => t, "Carnot (%)" => Float.round(c * 100, 2),
+      "Brayton (%)" => Float.round(b * 100, 2), "Rankine (%)" => Float.round(r * 100, 2)}
+  end)
+
+Vl.new(width: 650, height: 360, title: "Thermodynamic Cycle Efficiency vs Hot Source Temperature")
+|> Vl.data_from_values(data)
+|> Vl.transform(fold: ["Carnot (%)", "Brayton (%)", "Rankine (%)"], as: ["Cycle", "Efficiency (%)"])
+|> Vl.mark(:line, stroke_width: 2)
+|> Vl.encode_field(:x, "T_hot (°C)", type: :quantitative)
+|> Vl.encode_field(:y, "Efficiency (%)", type: :quantitative, scale: [domain: [0, 90]])
+|> Vl.encode_field(:color, "Cycle", type: :nominal)
+|> Kino.VegaLite.new()
+```
+
+---
+
+## 2. Ideal Gas Law & Isentropic Processes
+
+```elixir
+p1_input = Kino.Input.number("Initial pressure P₁ (bar)", default: 1.0)
+t1_input = Kino.Input.number("Initial temperature T₁ (°C)", default: 20.0)
+r_input  = Kino.Input.number("Compression ratio P₂/P₁", default: 10.0)
+Kino.Layout.grid([p1_input, t1_input, r_input], columns: 3)
+```
+
+```elixir
+p1 = Kino.Input.read(p1_input) * 1e5  # to Pa
+t1 = Kino.Input.read(t1_input) + 273.15
+r  = Kino.Input.read(r_input)
+p2 = p1 * r
+
+iso = EnergyX.Thermal.Thermodynamics.isentropic_process(%{t1_k: t1, p1: p1, p2: p2})
+
+v1 = EnergyX.Thermal.Thermodynamics.ideal_gas(:v, %{p: p1, n: 1.0, t_k: t1})
+v2 = EnergyX.Thermal.Thermodynamics.ideal_gas(:v, %{p: p2, n: 1.0, t_k: iso.t2_k})
+
+IO.puts("""
+Isentropic compression (γ = 1.4):
+  State 1: P₁ = #{Float.round(p1/1e5, 2)} bar | T₁ = #{Float.round(t1-273.15, 1)}°C | V₁ = #{Float.round(v1.v_m3*1000, 3)} L/mol
+  State 2: P₂ = #{Float.round(p2/1e5, 2)} bar | T₂ = #{Float.round(iso.t2_c, 1)}°C | V₂ = #{Float.round(v2.v_m3*1000, 3)} L/mol
+  Temperature rise: #{Float.round(iso.t2_k - t1, 1)} K
+""")
+```
+
+---
+
+## 3. Heat Transfer — All Three Modes
+
+```elixir
+# Conduction
+cond_result = EnergyX.Thermal.HeatTransfer.fourier_conduction(%{
+  k: 0.04,        # mineral wool, W/(m·K)
+  area_m2: 10.0,
+  delta_t: 20.0,
+  thickness_m: 0.10
+})
+
+# Convection (Dittus-Boelter)
+re = 50_000; pr = 0.71   # turbulent air flow
+db = EnergyX.Thermal.HeatTransfer.dittus_boelter(%{re: re, pr: pr, heating: true})
+nu = db.nusselt
+# h = Nu × k / D (D=0.05m, k_air=0.026 W/m·K)
+h_conv = nu * 0.026 / 0.05
+
+# Radiation
+rad = EnergyX.Thermal.HeatTransfer.radiation_net(%{
+  epsilon: 0.85, area_m2: 1.0, t_hot_k: 800.0, t_cold_k: 300.0
+})
+
+IO.puts("""
+Heat Transfer — Three Modes
+────────────────────────────────────────────
+Conduction (100mm mineral wool, ΔT=20K):
+  Heat flux: #{Float.round(cond_result.heat_flux_density_w_m2, 2)} W/m²
+
+Forced convection (Re=#{re}, Pr=#{pr}, air duct D=50mm):
+  Nusselt = #{Float.round(nu, 1)}
+  h = #{Float.round(h_conv, 1)} W/(m²·K)
+
+Radiation (ε=0.85, T_hot=800K, T_cold=300K):
+  Net radiation = #{Float.round(rad.net_radiation_w / 1000, 2)} kW/m²
+""")
+```
+
+---
+
+## 4. Heat Exchanger — LMTD & NTU-ε
+
+```elixir
+# Counterflow heat exchanger
+lmtd = EnergyX.Thermal.HeatTransfer.lmtd(%{delta_t1: 80.0, delta_t2: 20.0})
+
+duty = EnergyX.Thermal.HeatTransfer.heat_exchanger_duty(%{
+  u: 500.0, area_m2: 20.0, lmtd: lmtd.lmtd_k, f: 1.0
+})
+
+# NTU method
+ntu_eff = EnergyX.Thermal.HeatTransfer.ntu_effectiveness(%{
+  c_hot: 10_000.0, c_cold: 8_000.0, ntu: 3.0, flow: :counterflow
+})
+
+IO.puts("""
+Heat Exchanger Analysis
+────────────────────────────────────────────
+LMTD (ΔT₁=80K, ΔT₂=20K counterflow):
+  LMTD = #{Float.round(lmtd.lmtd_k, 2)} K
+
+Duty (U=500 W/m²K, A=20 m²):
+  Q = #{Float.round(duty.duty_kw, 1)} kW
+
+NTU-ε (NTU=3.0, C_hot=10 kW/K, C_cold=8 kW/K):
+  Effectiveness ε = #{Float.round(ntu_eff.effectiveness * 100, 2)}%
+  Capacity ratio C_r = #{ntu_eff.capacity_ratio}
+""")
+```
+
+---
+
+## 5. Fluid Mechanics — Pipe Flow
+
+```elixir
+flow_v     = Kino.Input.number("Flow velocity (m/s)", default: 2.5)
+diameter   = Kino.Input.number("Pipe diameter (mm)",  default: 100.0)
+pipe_len   = Kino.Input.number("Pipe length (m)",     default: 100.0)
+Kino.Layout.grid([flow_v, diameter, pipe_len], columns: 3)
+```
+
+```elixir
+v = Kino.Input.read(flow_v)
+d = Kino.Input.read(diameter) / 1000.0
+l = Kino.Input.read(pipe_len)
+
+re_res = EnergyX.Thermal.FluidMechanics.reynolds(%{rho: 1000.0, velocity: v, diameter: d, viscosity_dyn: 1.0e-3})
+ff_res = EnergyX.Thermal.FluidMechanics.friction_factor(%{re: re_res.reynolds, relative_roughness: 4.5e-5 / d})
+dp_res = EnergyX.Thermal.FluidMechanics.pressure_drop(%{f: ff_res.friction_factor, length_m: l,
+           diameter_m: d, rho: 1000.0, velocity: v})
+
+pump   = EnergyX.Thermal.FluidMechanics.pump_power(%{rho: 1000.0,
+           flow_m3_s: v * :math.pi * d * d / 4.0,
+           head_m: dp_res.pressure_drop_pa / (1000.0 * 9.81),
+           eta_pump: 0.78})
+
+IO.puts("""
+Pipe Flow Analysis (water, ε/D = #{Float.round(4.5e-5/d, 6)})
+────────────────────────────────────────────
+Reynolds number:  #{trunc(re_res.reynolds)} → #{re_res.regime}
+Friction factor f: #{Float.round(ff_res.friction_factor, 6)} (Darcy-Weisbach)
+Pressure drop:    #{Float.round(dp_res.pressure_drop_pa/1000, 3)} kPa over #{l} m
+Pump power:       #{Float.round(pump.shaft_power_kw, 3)} kW (η=78%)
+""")
+```
+
+---
+
+## 6. Dimensionless Numbers — Summary
+
+```elixir
+dn_data = [
+  %{"Number" => "Reynolds", "Symbol" => "Re", "Formula" => "ρvL/μ", "Physical Meaning" => "Inertia / Viscous forces", "Critical Value" => "< 2300 laminar"},
+  %{"Number" => "Nusselt",  "Symbol" => "Nu", "Formula" => "hL/k",  "Physical Meaning" => "Convective / Conductive HT", "Critical Value" => "Correlation-dependent"},
+  %{"Number" => "Prandtl",  "Symbol" => "Pr", "Formula" => "μcp/k", "Physical Meaning" => "Momentum / Thermal diffusivity", "Critical Value" => "Air≈0.71, Water≈7"},
+  %{"Number" => "Grashof",  "Symbol" => "Gr", "Formula" => "gβΔTL³/ν²", "Physical Meaning" => "Buoyancy / Viscous forces", "Critical Value" => "—"},
+  %{"Number" => "Rayleigh", "Symbol" => "Ra", "Formula" => "Gr·Pr", "Physical Meaning" => "Free convection criterion", "Critical Value" => "> 10⁹ turbulent"},
+  %{"Number" => "Biot",     "Symbol" => "Bi", "Formula" => "hLc/k", "Physical Meaning" => "Surface / Internal resistance", "Critical Value" => "< 0.1 lumped"},
+  %{"Number" => "Fourier",  "Symbol" => "Fo", "Formula" => "αt/L²", "Physical Meaning" => "Dimensionless time (conduction)", "Critical Value" => "—"},
+  %{"Number" => "Mach",     "Symbol" => "Ma", "Formula" => "v/a",   "Physical Meaning" => "Flow speed / Sound speed", "Critical Value" => "< 0.3 incompressible"},
+  %{"Number" => "Froude",   "Symbol" => "Fr", "Formula" => "v/√(gL)", "Physical Meaning" => "Inertia / Gravity", "Critical Value" => "< 1 subcritical"},
+  %{"Number" => "Weber",    "Symbol" => "We", "Formula" => "ρv²L/σ", "Physical Meaning" => "Inertia / Surface tension", "Critical Value" => "—"},
+  %{"Number" => "Eckert",   "Symbol" => "Ec", "Formula" => "v²/(cpΔT)", "Physical Meaning" => "Kinetic / Enthalpy", "Critical Value" => "—"},
+  %{"Number" => "Stanton",  "Symbol" => "St", "Formula" => "Nu/(Re·Pr)", "Physical Meaning" => "Heat transfer / Thermal capacity", "Critical Value" => "—"},
+  %{"Number" => "Peclet",   "Symbol" => "Pe", "Formula" => "Re·Pr", "Physical Meaning" => "Advection / Diffusion", "Critical Value" => "—"},
+  %{"Number" => "Strouhal", "Symbol" => "Sr", "Formula" => "fL/v",  "Physical Meaning" => "Oscillating flow frequency", "Critical Value" => "≈0.2 vortex shedding"},
+]
+
+Kino.DataTable.new(dn_data)
+```
+
+```elixir
+# Calculate all numbers for a specific flow condition
+result = EnergyX.Thermal.Dimensionless.all(%{
+  rho: 1.2, v: 5.0, l: 0.5, mu: 1.81e-5, cp: 1006.0,
+  k: 0.026, beta: 3.3e-3, delta_t: 20.0, alpha: 2.2e-5, sigma_s: 0.072
+})
+
+IO.puts("Dimensionless numbers for air flow (v=5m/s, L=0.5m, ΔT=20K):")
+Enum.each(result, fn {k, v} -> IO.puts("  #{k}: #{Float.round(v * 1.0, 4)}") end)
+```
+
+---
+
+## 7. Exergy Analysis
+
+```elixir
+# Flow exergy at elevated temperature and pressure
+ex = EnergyX.Thermal.Thermodynamics.flow_exergy(%{
+  t_k: 500.0, t0_k: 298.15,
+  p: 2_000_000.0, p0: 101_325.0,
+  cp: 1006.0, r_gas: 287.0
+})
+
+IO.puts("""
+Flow Exergy (Air stream at 500 K, 20 bar)
+────────────────────────────────────────────
+Thermal exergy:   #{Float.round(ex.thermal_exergy_j_kg / 1000, 2)} kJ/kg
+Pressure exergy:  #{Float.round(ex.pressure_exergy_j_kg / 1000, 2)} kJ/kg
+Total exergy:     #{Float.round(ex.exergy_kj_kg, 2)} kJ/kg
+""")
+
+# Exergy destruction vs temperature
+ex_data =
+  Enum.map(300..1200//50, fn t ->
+    e = EnergyX.Thermal.Thermodynamics.flow_exergy(%{
+          t_k: t * 1.0, t0_k: 298.15, p: 101_325.0, p0: 101_325.0,
+          cp: 1006.0, r_gas: 287.0})
+    %{"Temperature (K)" => t, "Thermal Exergy (kJ/kg)" => Float.round(e.thermal_exergy_j_kg / 1000, 2)}
+  end)
+
+Vl.new(width: 600, height: 300, title: "Thermal Exergy vs Temperature (P = P₀)")
+|> Vl.data_from_values(ex_data)
+|> Vl.mark(:area, color: "#1F4E79", opacity: 0.7, line: true)
+|> Vl.encode_field(:x, "Temperature (K)", type: :quantitative)
+|> Vl.encode_field(:y, "Thermal Exergy (kJ/kg)", type: :quantitative)
+|> Kino.VegaLite.new()
+```
+
+---
+
+*📘 Continue to Notebook 02 — Solar PV Systems*

@@ -1,0 +1,146 @@
+# Notebook 05 — HVAC, Refrigeration & Psychrometrics
+<!-- livebook:{"persist_outputs":true} -->
+
+# ❄️ EnergyX — Notebook 05
+## Psychrometrics, Vapor Compression, Absorption & Cooling Towers
+
+```elixir
+Mix.install([
+  {:energyx, "~> 1.0"},
+  {:kino, "~> 0.12"},
+  {:kino_vega_lite, "~> 0.1"},
+  {:vega_lite, "~> 0.1"}
+])
+alias VegaLite, as: Vl
+```
+
+## 1. Psychrometric State Calculator
+
+```elixir
+tdb_input = Kino.Input.number("Dry-bulb temperature (°C)", default: 30.0)
+rh_input  = Kino.Input.number("Relative humidity (%)",     default: 60.0)
+Kino.Layout.grid([tdb_input, rh_input], columns: 2)
+```
+
+```elixir
+tdb = Kino.Input.read(tdb_input)
+rh  = Kino.Input.read(rh_input)
+state = EnergyX.HVAC.Psychrometrics.state_from_rh(%{t_db_c: tdb, rh_pct: rh})
+
+IO.puts("""
+Psychrometric State at #{tdb}°C DB / #{rh}% RH:
+  Humidity ratio W:   #{state.humidity_ratio_g_kg} g/kg_da
+  Specific enthalpy:  #{state.enthalpy_kj_kg} kJ/kg_da
+  Specific volume:    #{state.specific_volume_m3_kg} m³/kg_da
+  Dew point:          #{state.dew_point_c}°C
+  Vapour pressure:    #{Float.round(state.vapour_pressure_pa, 1)} Pa
+""")
+```
+
+```elixir
+# Psychrometric chart data
+chart_data =
+  for rh_val <- [10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
+      t <- Enum.map(-10..50//2, & &1 * 1.0) do
+    s = EnergyX.HVAC.Psychrometrics.state_from_rh(%{t_db_c: t, rh_pct: rh_val * 1.0})
+    %{"T_db (°C)" => t, "W (g/kg)" => s.humidity_ratio_g_kg, "RH" => "#{rh_val}%"}
+  end
+
+Vl.new(width: 650, height: 420, title: "Psychrometric Chart (ASHRAE equations)")
+|> Vl.data_from_values(chart_data)
+|> Vl.mark(:line, stroke_width: 1.2, opacity: 0.8)
+|> Vl.encode_field(:x, "T_db (°C)", type: :quantitative, scale: [domain: [-10, 52]])
+|> Vl.encode_field(:y, "W (g/kg)", type: :quantitative, scale: [domain: [0, 30]])
+|> Vl.encode_field(:color, "RH", type: :ordinal)
+|> Kino.VegaLite.new()
+```
+
+## 2. Vapor Compression Cycle — COP vs Lift
+
+```elixir
+cop_data =
+  for ref <- [:r134a, :r410a, :r290],
+      tc <- Enum.map(25..55//5, & &1 * 1.0) do
+    cycle = EnergyX.HVAC.VaporCompression.single_stage_cycle(%{
+              t_evap_c: 5.0, t_cond_c: tc, eta_comp: 0.75, refrigerant: ref})
+    %{"T_cond (°C)" => tc, "COP" => cycle.cop_cooling, "Refrigerant" => ref}
+  end
+
+Vl.new(width: 650, height: 340, title: "Refrigeration COP vs Condensing Temperature (T_evap = 5°C)")
+|> Vl.data_from_values(cop_data)
+|> Vl.mark(:line, stroke_width: 2)
+|> Vl.encode_field(:x, "T_cond (°C)", type: :quantitative)
+|> Vl.encode_field(:y, "COP", type: :quantitative)
+|> Vl.encode_field(:color, "Refrigerant", type: :nominal)
+|> Kino.VegaLite.new()
+```
+
+## 3. Heat Pump COP — Heating Mode
+
+```elixir
+hp_data =
+  Enum.map(-15..20, fn t_src ->
+    cop = EnergyX.HeatPump.cop_heating(%{t_supply: 45.0, t_source: t_src * 1.0})
+    %{"Source T (°C)" => t_src, "COP Heating" => cop.cop_actual, "SPF" => cop.spf_estimate}
+  end)
+
+Vl.new(width: 600, height: 300, title: "Heat Pump COP vs Source Temperature (T_supply = 45°C)")
+|> Vl.data_from_values(hp_data)
+|> Vl.mark(:line, color: "#ED7D31", stroke_width: 2.5)
+|> Vl.encode_field(:x, "Source T (°C)", type: :quantitative)
+|> Vl.encode_field(:y, "COP Heating", type: :quantitative)
+|> Kino.VegaLite.new()
+```
+
+## 4. Absorption Chiller — LiBr-H₂O
+
+```elixir
+abs_data =
+  Enum.map(75..140//5, fn tg ->
+    single = EnergyX.HVAC.AbsorptionCycle.libr_chiller_cop(%{
+               t_generator_c: tg * 1.0, t_absorber_c: 35.0, t_evaporator_c: 7.0, effect: :single})
+    double = EnergyX.HVAC.AbsorptionCycle.libr_chiller_cop(%{
+               t_generator_c: tg * 1.0, t_absorber_c: 35.0, t_evaporator_c: 7.0, effect: :double})
+    %{"Generator T (°C)" => tg,
+      "Single Effect COP" => single.cop_practical,
+      "Double Effect COP" => double.cop_practical}
+  end)
+
+Vl.new(width: 600, height: 300, title: "LiBr-H₂O Absorption Chiller COP vs Generator Temperature")
+|> Vl.data_from_values(abs_data)
+|> Vl.transform(fold: ["Single Effect COP", "Double Effect COP"], as: ["Effect", "COP"])
+|> Vl.mark(:line, stroke_width: 2)
+|> Vl.encode_field(:x, "Generator T (°C)", type: :quantitative)
+|> Vl.encode_field(:y, "COP", type: :quantitative)
+|> Vl.encode_field(:color, "Effect", type: :nominal)
+|> Kino.VegaLite.new()
+```
+
+## 5. Cooling Tower — NTU-Merkel Analysis
+
+```elixir
+ct = EnergyX.HVAC.CoolingTower.ntu_merkel(%{
+  t_water_in_c: 35.0, t_water_out_c: 28.0, t_wb_in_c: 22.0, l_g_ratio: 1.2
+})
+makeup = EnergyX.HVAC.CoolingTower.makeup_water(%{
+  water_flow_kg_s: 100.0, range_k: 7.0, cycles_of_concentration: 3.5
+})
+
+IO.puts("""
+Cooling Tower Performance:
+  NTU (Merkel):       #{ct.ntu}
+  Range:              #{ct.range_k} K
+  Approach:           #{ct.approach_k} K
+  Design adequate:    #{ct.design_adequate}
+
+Makeup Water (100 kg/s, range=7K, CoC=3.5):
+  Evaporation:        #{Float.round(makeup.evaporation_kg_s * 3600, 1)} kg/h
+  Blowdown:           #{Float.round(makeup.blowdown_kg_s * 3600, 1)} kg/h
+  Total makeup:       #{Float.round(makeup.makeup_water_kg_s * 3600, 1)} kg/h
+  (#{makeup.makeup_pct_of_L}% of circulating flow)
+""")
+```
+
+---
+
+*📘 Continue to Notebook 06 — Electrical Systems*

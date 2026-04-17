@@ -1,0 +1,276 @@
+# Notebook 09 — Exergy Analysis & Thermoeconomics (SPECO)
+<!-- livebook:{"persist_outputs":true} -->
+
+# 🔬 EnergyX — Notebook 09
+## Exergy, Second-Law Analysis, SPECO Thermoeconomics & Advanced Exergy
+
+```elixir
+Mix.install([
+  {:energyx, "~> 1.0"},
+  {:kino, "~> 0.12"},
+  {:kino_vega_lite, "~> 0.1"},
+  {:vega_lite, "~> 0.1"}
+])
+alias VegaLite, as: Vl
+```
+
+---
+
+## 1. Physical & Chemical Exergy of Streams
+
+```elixir
+# Physical exergy — pressurised hot gas stream
+ex_phys = EnergyX.Analysis.ExergyEconomics.specific_physical_exergy(%{
+  t_k:    773.15,   # 500°C
+  p_pa:   2_000_000.0,
+  cp:     1006.0,
+  r_gas:  287.0,
+  t0_k:   298.15,
+  p0_pa:  101_325.0
+})
+
+IO.puts("""
+Physical Exergy (Air at 500°C, 20 bar):
+  Thermal exergy:   #{ex_phys.ex_thermal_kj_kg} kJ/kg
+  Pressure exergy:  #{ex_phys.ex_pressure_kj_kg} kJ/kg
+  Total physical:   #{ex_phys.ex_physical_kj_kg} kJ/kg
+""")
+
+# Chemical exergy reference values
+fuels = [:methane, :hydrogen, :coal_bit, :diesel, :biomass, :ammonia]
+IO.puts("Chemical Exergy Reference Values:")
+Enum.each(fuels, fn fuel ->
+  ex = EnergyX.Analysis.ExergyEconomics.fuel_chemical_exergy(fuel)
+  IO.puts("  #{fuel}: #{ex.ex_ch_kj_kg} kJ/kg")
+end)
+```
+
+```elixir
+# Exergy of heat at different temperatures
+ex_heat_data =
+  Enum.map(50..800//25, fn t_c ->
+    t_k = t_c + 273.15
+    q_ex = EnergyX.Analysis.ExergyEconomics.heat_exergy(%{q_kw: 1000.0, t_k: t_k})
+    %{"Temperature (°C)" => t_c,
+      "Exergy Factor (−)"  => q_ex.carnot_factor,
+      "Ex per 1000 kW (kW)" => q_ex.exergy_kw}
+  end)
+
+Vl.new(width: 650, height: 320,
+       title: "Heat Exergy — Carnot Factor vs Temperature (T₀ = 25°C)")
+|> Vl.data_from_values(ex_heat_data)
+|> Vl.mark(:area, color: "#C00000", opacity: 0.65, line: %{color: "#7B0000", stroke_width: 2})
+|> Vl.encode_field(:x, "Temperature (°C)", type: :quantitative)
+|> Vl.encode_field(:y, "Exergy Factor (−)", type: :quantitative, scale: [domain: [0, 1]])
+|> Kino.VegaLite.new()
+```
+
+---
+
+## 2. Component Exergy Balances
+
+```elixir
+# Turbine exergy balance
+turbine = EnergyX.Analysis.ExergyEconomics.turbine_exergy(%{
+  ex_in_kw:    72_000.0,
+  ex_out_kw:   38_000.0,
+  w_shaft_kw:  32_000.0
+})
+
+# Heat exchanger exergy balance
+hx = EnergyX.Analysis.ExergyEconomics.heat_exchanger_exergy(%{
+  ex_hot_in_kw:  20_000.0,
+  ex_hot_out_kw:  8_000.0,
+  ex_cold_in_kw:  4_000.0,
+  ex_cold_out_kw: 14_500.0
+})
+
+# Compressor exergy balance
+comp = EnergyX.Analysis.ExergyEconomics.compressor_exergy(%{
+  w_shaft_kw:  5_000.0,
+  ex_in_kw:    3_000.0,
+  ex_out_kw:   7_200.0
+})
+
+IO.puts("""
+Component Exergy Balances:
+
+Steam Turbine (72 MW in → 38 MW out + 32 MW shaft):
+  Exergy efficiency η_ex: #{turbine.eta_exergy * 100 |> Float.round(2)}%
+  Irreversibility:        #{turbine.irreversibility_kw} kW
+
+Heat Exchanger (shell & tube):
+  Exergy efficiency η_ex: #{hx.eta_exergy * 100 |> Float.round(2)}%
+  Irreversibility:        #{hx.irreversibility_kw} kW
+
+Compressor (5 MW shaft → 7.2 MW product):
+  Exergy efficiency η_ex: #{comp.eta_exergy * 100 |> Float.round(2)}%
+  Irreversibility:        #{comp.irreversibility_kw} kW
+""")
+```
+
+---
+
+## 3. Full Plant SPECO Analysis — 100 MW Steam Plant
+
+```elixir
+# Fuel: natural gas at 0.04 USD/kWh (exergy basis)
+components = [
+  %{component: "Combustion Chamber",
+    ex_fuel_kw: 100_000.0, ex_product_kw: 88_000.0,
+    z_dot_usd_h: 120.0,    c_fuel_usd_per_kwh: 0.04},
+  %{component: "Boiler / HRSG",
+    ex_fuel_kw:  88_000.0, ex_product_kw: 72_000.0,
+    z_dot_usd_h: 180.0,    c_fuel_usd_per_kwh: 0.04},
+  %{component: "Steam Turbine",
+    ex_fuel_kw:  72_000.0, ex_product_kw: 38_000.0,
+    z_dot_usd_h: 220.0,    c_fuel_usd_per_kwh: 0.04},
+  %{component: "Condenser",
+    ex_fuel_kw:  34_000.0, ex_product_kw: 500.0,
+    z_dot_usd_h:  60.0,    c_fuel_usd_per_kwh: 0.04},
+  %{component: "Feed Pump",
+    ex_fuel_kw:    800.0,  ex_product_kw: 680.0,
+    z_dot_usd_h:   20.0,   c_fuel_usd_per_kwh: 0.04},
+]
+
+results = EnergyX.Analysis.ExergyEconomics.plant_speco_analysis(components)
+
+IO.puts("SPECO Analysis — 100 MW Steam Power Plant")
+IO.puts(String.duplicate("═", 72))
+IO.puts(String.pad_trailing("Component", 22) <>
+        String.pad_leading("η_ex %", 8) <>
+        String.pad_leading("İ (kW)", 10) <>
+        String.pad_leading("Ċ_irr $/h", 11) <>
+        String.pad_leading("Ż $/h", 8) <>
+        String.pad_leading("ċ_P ¢/kWh", 11) <>
+        String.pad_leading("f", 6))
+IO.puts(String.duplicate("─", 72))
+
+Enum.each(results, fn r ->
+  IO.puts(String.pad_trailing(r.component, 22) <>
+          String.pad_leading("#{Float.round(r.exergy_efficiency * 100, 1)}", 8) <>
+          String.pad_leading("#{r.irreversibility_kw}", 10) <>
+          String.pad_leading("#{Float.round(r.c_dot_irreversibility_usd_h, 1)}", 11) <>
+          String.pad_leading("#{r.z_dot_capital_usd_h}", 8) <>
+          String.pad_leading("#{Float.round(r.c_product_usd_per_kwh * 100, 3)}", 11) <>
+          String.pad_leading("#{Float.round(r.f_factor, 3)}", 6))
+end)
+```
+
+```elixir
+# SPECO scatter: Ċ_irr vs Ż — diagnosis chart
+scatter_data = Enum.map(results, fn r ->
+  %{"Component"                 => r.component,
+    "Ċ_irr (USD/h)"             => Float.round(r.c_dot_irreversibility_usd_h, 1),
+    "Ż (USD/h)"                 => r.z_dot_capital_usd_h,
+    "Irreversibility (kW)/100"  => r.irreversibility_kw / 100}
+end)
+
+Vl.new(width: 650, height: 380, title: "Exergoeconomic Diagnosis — Ċ_irr vs Ż (bubble = irreversibility)")
+|> Vl.data_from_values(scatter_data)
+|> Vl.mark(:point, filled: true, opacity: 0.85)
+|> Vl.encode_field(:x, "Ċ_irr (USD/h)", type: :quantitative,
+                   title: "Exergy Destruction Cost Rate Ċ_irr (USD/h)")
+|> Vl.encode_field(:y, "Ż (USD/h)", type: :quantitative,
+                   title: "Capital Cost Rate Ż (USD/h)")
+|> Vl.encode_field(:color, "Component", type: :nominal)
+|> Vl.encode_field(:size, "Irreversibility (kW)/100", type: :quantitative)
+|> Kino.VegaLite.new()
+```
+
+---
+
+## 4. Exergy Waterfall — Where Are the Losses?
+
+```elixir
+waterfall_data = [
+  %{"Stage" => "1. Fuel input",          "Exergy (kW)" => 100_000, "Type" => "Input"},
+  %{"Stage" => "2. After combustion",    "Exergy (kW)" =>  88_000, "Type" => "Useful"},
+  %{"Stage" => "   Combustion loss",     "Exergy (kW)" => -12_000, "Type" => "Loss"},
+  %{"Stage" => "3. After boiler",        "Exergy (kW)" =>  72_000, "Type" => "Useful"},
+  %{"Stage" => "   Boiler/HX loss",      "Exergy (kW)" => -16_000, "Type" => "Loss"},
+  %{"Stage" => "4. Turbine product",     "Exergy (kW)" =>  38_000, "Type" => "Useful"},
+  %{"Stage" => "   Turbine loss",        "Exergy (kW)" => -34_000, "Type" => "Loss"},
+  %{"Stage" => "5. Net electricity",     "Exergy (kW)" =>  38_000, "Type" => "Product"},
+  %{"Stage" => "   Condenser (wasted)",  "Exergy (kW)" => -33_500, "Type" => "Waste"},
+]
+
+Vl.new(width: 650, height: 360, title: "Exergy Waterfall — 100 MW Steam Plant")
+|> Vl.data_from_values(waterfall_data)
+|> Vl.mark(:bar, opacity: 0.9)
+|> Vl.encode_field(:x, "Stage", type: :nominal, axis: [label_angle: -35])
+|> Vl.encode_field(:y, "Exergy (kW)", type: :quantitative)
+|> Vl.encode_field(:color, "Type", type: :nominal,
+                   scale: [domain: ["Input", "Useful", "Loss", "Product", "Waste"],
+                           range: ["#2E75B6", "#548235", "#C00000", "#F5A623", "#AAAAAA"]])
+|> Kino.VegaLite.new()
+```
+
+---
+
+## 5. Advanced Exergy — Avoidable vs Unavoidable
+
+```elixir
+adv = EnergyX.Analysis.ExergyEconomics.advanced_exergy(%{
+  irr_actual_kw:      34_000.0,   # turbine actual irreversibility
+  irr_unavoidable_kw: 10_000.0,   # theoretical minimum (perfect materials etc.)
+  irr_endogenous_kw:  22_000.0    # due to this component's own irreversibilities
+})
+
+IO.puts("""
+Advanced Exergy Analysis — Steam Turbine:
+  Total irreversibility:       #{adv.irr_actual_kw} kW
+  Unavoidable portion:         #{adv.irr_unavoidable_kw} kW
+  Avoidable portion:           #{adv.avoidable_kw} kW  (#{adv.avoidable_pct}%)
+  Endogenous (own component):  #{adv.irr_endogenous_kw} kW
+  Exogenous (other components): #{adv.exogenous_kw} kW
+
+  Improvement potential: #{adv.improvement_potential_pct}% of actual irreversibility is avoidable
+""")
+```
+
+---
+
+## 6. First Law vs Second Law — Efficiency Comparison
+
+```elixir
+efficiency_comparison = [
+  %{"System"               => "Electric heater (direct)",
+    "1st Law η (%)"        => 99, "2nd Law ψ (%)" => 5},
+  %{"System"               => "Gas boiler (space heat)",
+    "1st Law η (%)"        => 90, "2nd Law ψ (%)" => 8},
+  %{"System"               => "Heat pump (COP=3)",
+    "1st Law η (%)"        => 300, "2nd Law ψ (%)" => 45},
+  %{"System"               => "Steam turbine",
+    "1st Law η (%)"        => 85, "2nd Law ψ (%)" => 80},
+  %{"System"               => "Gas turbine (actual)",
+    "1st Law η (%)"        => 38, "2nd Law ψ (%)" => 40},
+  %{"System"               => "CCGT",
+    "1st Law η (%)"        => 58, "2nd Law ψ (%)" => 56},
+  %{"System"               => "PEM fuel cell",
+    "1st Law η (%)"        => 55, "2nd Law ψ (%)" => 52},
+  %{"System"               => "PV solar cell",
+    "1st Law η (%)"        => 20, "2nd Law ψ (%)" => 20},
+  %{"System"               => "Plate heat exchanger",
+    "1st Law η (%)"        => 95, "2nd Law ψ (%)" => 70},
+  %{"System"               => "Condenser (waste heat)",
+    "1st Law η (%)"        => 95, "2nd Law ψ (%)" => 3},
+]
+
+Vl.new(width: 680, height: 420,
+       title: "First Law (Energy) vs Second Law (Exergy) Efficiency — Selected Systems")
+|> Vl.data_from_values(efficiency_comparison)
+|> Vl.transform(fold: ["1st Law η (%)", "2nd Law ψ (%)"], as: ["Law", "Efficiency (%)"])
+|> Vl.mark(:bar, opacity: 0.85)
+|> Vl.encode_field(:y, "System", type: :nominal)
+|> Vl.encode_field(:x, "Efficiency (%)", type: :quantitative)
+|> Vl.encode_field(:color, "Law", type: :nominal,
+                   scale: [domain: ["1st Law η (%)", "2nd Law ψ (%)"],
+                           range: ["#2E75B6", "#C00000"]])
+|> Vl.encode_field(:y_offset, "Law", type: :nominal)
+|> Kino.VegaLite.new()
+```
+
+---
+
+*📘 Continue to Notebook 10 — Carbon, LCA & Full Energy Audit*

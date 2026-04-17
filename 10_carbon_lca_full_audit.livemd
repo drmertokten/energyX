@@ -1,0 +1,444 @@
+# Notebook 10 — Carbon Accounting, LCA & Full Energy Audit
+<!-- livebook:{"persist_outputs":true} -->
+
+# 🌍 EnergyX — Notebook 10
+## GHG Accounting, LCA, CCS, Carbon Markets & Complete Energy Audit
+
+```elixir
+Mix.install([
+  {:energyx, "~> 1.0"},
+  {:kino, "~> 0.12"},
+  {:kino_vega_lite, "~> 0.1"},
+  {:vega_lite, "~> 0.1"}
+])
+alias VegaLite, as: Vl
+```
+
+---
+
+## 1. GHG Accounting — Scope 1, 2 & 3
+
+```elixir
+# Scope 1 — Direct combustion (on-site boilers, vehicles, processes)
+scope1_inputs = %{
+  natural_gas_m3: 500_000.0,  # m³/yr
+  diesel_l:        80_000.0,  # litres/yr (company vehicles)
+  coal_bituminous_kg: 200_000.0
+}
+
+scope1 = EnergyX.Carbon.GHGAccounting.scope1_emissions(scope1_inputs)
+scope1_total_t = Enum.sum(Enum.map(scope1, & &1.co2_t))
+
+# Scope 2 — Purchased electricity (location-based, Turkey grid)
+scope2 = EnergyX.Carbon.GHGAccounting.scope2_emissions(%{
+  electricity_kwh: 4_500_000.0, grid_factor_kgco2_kwh: 0.453})
+
+IO.puts("""
+GHG Inventory — Scope 1 (Direct Combustion):
+""")
+Enum.each(scope1, fn e ->
+  IO.puts("  #{e.fuel}: #{e.amount} #{e.unit} → #{Float.round(e.co2_t, 2)} t CO₂")
+end)
+IO.puts("  Scope 1 Total: #{Float.round(scope1_total_t, 1)} t CO₂/yr")
+
+IO.puts("""
+
+Scope 2 (Purchased Electricity — Location-Based, TR grid):
+  #{trunc(scope2.electricity_kwh)} kWh × #{scope2.emission_factor} kg CO₂/kWh
+  Scope 2 Total: #{scope2.co2_t} t CO₂/yr
+""")
+```
+
+```elixir
+# GWP100 values (IPCC AR6)
+gwp = EnergyX.Carbon.GHGAccounting.gwp100()
+IO.puts("GWP₁₀₀ Values (IPCC AR6, 2021):")
+Enum.each(gwp, fn {gas, gwp_val} ->
+  IO.puts("  #{gas}: #{gwp_val} kg CO₂eq/kg")
+end)
+```
+
+---
+
+## 2. Net-Zero Pathway Calculator
+
+```elixir
+co2_input = Kino.Input.number("Current emissions (t CO₂/yr)", default: 10_000.0)
+yr_input  = Kino.Input.number("Net-zero target year",         default: 2050)
+res_input = Kino.Input.number("Residual emissions (t CO₂)",  default: 200.0)
+Kino.Layout.grid([co2_input, yr_input, res_input], columns: 3)
+```
+
+```elixir
+e0   = Kino.Input.read(co2_input)
+ty   = Kino.Input.read(yr_input)
+res  = Kino.Input.read(res_input)
+
+pathway = EnergyX.Carbon.GHGAccounting.netzero_pathway(%{
+  current_t_co2_yr: e0, target_year: ty, base_year: 2024, residual_t_co2: res})
+
+IO.puts("""
+Net-Zero Pathway to #{ty}:
+  Annual reduction required: #{pathway.annual_reduction_pct}%/yr
+  Total reduction:           #{pathway.total_reduction_pct}%
+""")
+
+path_data = pathway.pathway
+
+Vl.new(width: 650, height: 300, title: "Net-Zero Emissions Pathway to #{ty}")
+|> Vl.data_from_values(path_data)
+|> Vl.mark(:area, color: "#548235", opacity: 0.65, line: %{color: "#375623", stroke_width: 2})
+|> Vl.encode_field(:x, "year", type: :quantitative, title: "Year")
+|> Vl.encode_field(:y, "emissions_t", type: :quantitative, title: "Emissions (t CO₂/yr)")
+|> Kino.VegaLite.new()
+```
+
+---
+
+## 3. Lifecycle CO₂ Intensity — Technology Comparison
+
+```elixir
+lca_factors = EnergyX.Carbon.LCA.lifecycle_co2_factors()
+
+lca_data =
+  lca_factors
+  |> Enum.map(fn {tech, data} ->
+    %{"Technology"       => tech |> Atom.to_string() |> String.replace("_", " "),
+      "Median (g/kWh)"   => data.median,
+      "Min (g/kWh)"      => data.min,
+      "Max (g/kWh)"      => data.max}
+  end)
+  |> Enum.sort_by(& &1["Median (g/kWh)"])
+
+Vl.new(width: 680, height: 480,
+       title: "Lifecycle CO₂ Intensity — IPCC AR6 (g CO₂eq/kWh)")
+|> Vl.data_from_values(lca_data)
+|> Vl.mark(:bar, opacity: 0.85)
+|> Vl.encode_field(:y, "Technology", type: :nominal, sort: "x")
+|> Vl.encode_field(:x, "Min (g/kWh)", type: :quantitative, title: "Lifecycle CO₂ (g CO₂eq/kWh)")
+|> Vl.encode_field(:x2, "Max (g/kWh)")
+|> Kino.VegaLite.new()
+```
+
+---
+
+## 4. Carbon Capture & Storage (CCS) — Cost Analysis
+
+```elixir
+# Post-combustion CCS on a coal plant
+ccs = EnergyX.Carbon.CCS.post_combustion_ccs(%{
+  plant_mw: 500.0, capture_rate: 0.90,
+  regen_gj_t: 3.6, co2_intensity_kg_mwh: 900.0, eta_plant: 0.40})
+
+IO.puts("""
+Post-Combustion CCS — 500 MW Coal Plant (90% capture):
+  CO₂ captured:         #{ccs.co2_captured_t_h} t/h
+  Energy penalty:       #{ccs.energy_penalty_mw} MW (#{ccs.energy_penalty_pct}%)
+  Net power output:     #{ccs.net_power_mw} MW
+  Net plant efficiency: #{Float.round(ccs.net_plant_efficiency * 100, 2)}%
+""")
+
+# DAC performance
+dac = EnergyX.Carbon.CCS.dac_performance(%{
+  technology: :solid_sorbent, co2_t_yr: 10_000.0,
+  elec_price: 0.05, heat_price: 0.02})
+
+IO.puts("""
+Direct Air Capture — Solid Sorbent (Climeworks-type), 10,000 t CO₂/yr:
+  Thermal energy:        #{dac.thermal_energy_kwh_t} kWh_th/t
+  Electrical energy:     #{dac.electric_energy_kwh_t} kWh_e/t
+  Energy cost:           USD #{dac.energy_cost_usd_t}/t
+  Total cost range:      USD #{dac.total_cost_range_usd_t.min}–#{dac.total_cost_range_usd_t.max}/t
+  Annual energy:         #{dac.annual_energy_kwh} kWh/yr
+""")
+```
+
+---
+
+## 5. Carbon Markets — ETS & Social Cost of Carbon
+
+```elixir
+# ETS compliance position
+ets = EnergyX.Carbon.CarbonMarkets.ets_compliance(%{
+  verified_emissions_t: 120_000.0, free_allocation_t: 95_000.0,
+  carbon_price_usd_t: 65.0, surplus_sell_option: true})
+
+IO.puts("""
+EU ETS Compliance (65 USD/t CO₂):
+  Verified emissions:  #{trunc(ets.position_t + 95_000)} t CO₂
+  Free allocation:     95,000 t CO₂
+  Position:            #{trunc(ets.position_t)} t (#{ets.status})
+  Compliance cost:     USD #{ets.compliance_cost_usd}
+  Surplus value:       USD #{ets.surplus_value_usd}
+""")
+
+# Social cost of carbon reference
+scc = EnergyX.Carbon.CarbonMarkets.scc_reference()
+scc_data = Enum.map(scc, fn {name, data} ->
+  %{"Source" => name |> Atom.to_string() |> String.replace("_", " "), "USD/t CO₂" => data.usd_t}
+end) |> Enum.sort_by(& &1["USD/t CO₂"])
+
+Vl.new(width: 650, height: 280, title: "Social Cost of Carbon Reference Values (USD/t CO₂)")
+|> Vl.data_from_values(scc_data)
+|> Vl.mark(:bar, color: "#7030A0", opacity: 0.82)
+|> Vl.encode_field(:y, "Source", type: :nominal, sort: "-x")
+|> Vl.encode_field(:x, "USD/t CO₂", type: :quantitative)
+|> Kino.VegaLite.new()
+```
+
+---
+
+## 6. EPBT & EROI — Renewable Energy LCA
+
+```elixir
+epbt_data = [
+  %{technology: "Utility PV (monocrystalline)",
+    embodied_gj: 2_800.0, annual_gen_kwh: 1_800_000.0, lifetime: 30},
+  %{technology: "Wind turbine (onshore)",
+    embodied_gj: 3_500.0, annual_gen_kwh: 9_000_000.0, lifetime: 25},
+  %{technology: "Wind turbine (offshore)",
+    embodied_gj: 8_000.0, annual_gen_kwh: 18_000_000.0, lifetime: 25},
+  %{technology: "Hydro (large dam)",
+    embodied_gj: 15_000.0, annual_gen_kwh: 50_000_000.0, lifetime: 50},
+  %{technology: "Nuclear (Gen III+)",
+    embodied_gj: 50_000.0, annual_gen_kwh: 80_000_000.0, lifetime: 60},
+  %{technology: "Rooftop PV (polycrystalline)",
+    embodied_gj: 1_200.0, annual_gen_kwh: 600_000.0, lifetime: 25},
+]
+
+lca_results = Enum.map(epbt_data, fn t ->
+  epbt = EnergyX.Carbon.LCA.energy_payback(%{
+    embodied_energy_gj: t.embodied_gj,
+    annual_gen_kwh: t.annual_gen_kwh,
+    lifetime_yr: t.lifetime})
+  %{"Technology"     => t.technology,
+    "EPBT (yr)"       => epbt.epbt_years,
+    "EROI"            => epbt.eroi,
+    "Lifetime (yr)"   => t.lifetime}
+end)
+
+IO.puts("Energy Payback Time (EPBT) & EROI:")
+Kino.DataTable.new(lca_results)
+```
+
+---
+
+## 7. Complete Industrial Energy Audit — Worked Example
+
+```elixir
+IO.puts("""
+╔══════════════════════════════════════════════════════════════════╗
+║    COMPLETE INDUSTRIAL ENERGY AUDIT — EXAMPLE FACILITY
+║    Food Processing Plant — 15,000 t/yr production
+╚══════════════════════════════════════════════════════════════════╝
+""")
+
+# Energy intensity benchmarking
+ei = EnergyX.EnergyAudit.energy_intensity(%{
+  energy_kwh_yr: 28_500_000.0,
+  production_volume: 15_000.0,
+  sector: :food_processing})
+
+IO.puts("""
+Energy Performance:
+  Actual EI:        #{ei.energy_intensity} kWh/t
+  Best practice:    #{ei.benchmark_best} kWh/t
+  Typical:          #{ei.benchmark_typical} kWh/t
+  Performance band: #{ei.performance_band}
+  Ratio to best:    #{ei.ratio_to_best}× (#{Float.round((ei.ratio_to_best - 1) * 100, 0)}% above best practice)
+""")
+
+# Identify and rank opportunities
+opportunities = [
+  %{category: :compressed_air, measure: "Fix 38 air leaks (survey complete)",
+    annual_savings_usd: 92_000, capex_usd: 18_000},
+  %{category: :lighting, measure: "LED retrofit — factory floor + offices",
+    annual_savings_usd: 35_000, capex_usd: 62_000},
+  %{category: :motors, measure: "VFDs on 8 cooling pumps (avg 22 kW each)",
+    annual_savings_usd: 48_000, capex_usd: 96_000},
+  %{category: :steam, measure: "Replace 22 failed-open steam traps",
+    annual_savings_usd: 41_000, capex_usd: 8_500},
+  %{category: :hvac, measure: "BMS setback + scheduling optimisation",
+    annual_savings_usd: 28_000, capex_usd: 35_000},
+  %{category: :heat_recovery, measure: "Flash steam recovery — condensate return",
+    annual_savings_usd: 22_000, capex_usd: 30_000},
+  %{category: :process, measure: "Dryer exhaust heat recovery (HX + preheater)",
+    annual_savings_usd: 75_000, capex_usd: 180_000},
+  %{category: :process, measure: "Pinch analysis + HEN retrofit (3 streams)",
+    annual_savings_usd: 110_000, capex_usd: 380_000},
+]
+
+ranked = EnergyX.EnergyAudit.opportunity_ranking(opportunities)
+
+IO.puts("Ranked Energy Saving Opportunities:")
+IO.puts(String.pad_trailing("Rank", 6) <>
+        String.pad_trailing("Category", 18) <>
+        String.pad_trailing("Measure", 45) <>
+        String.pad_leading("Saving/yr", 12) <>
+        String.pad_leading("CAPEX", 10) <>
+        String.pad_leading("Payback", 10))
+IO.puts(String.duplicate("─", 102))
+
+Enum.each(ranked, fn r ->
+  IO.puts(String.pad_trailing("##{r.priority_rank}", 6) <>
+          String.pad_trailing("#{r.category}", 18) <>
+          String.pad_trailing(String.slice(r.measure, 0, 43), 45) <>
+          String.pad_leading("$#{trunc(r.annual_savings_usd)}", 12) <>
+          String.pad_leading("$#{trunc(r.capex_usd)}", 10) <>
+          String.pad_leading("#{r.payback_years} yr", 10))
+end)
+
+total_savings = Enum.sum(Enum.map(ranked, & &1.annual_savings_usd))
+total_capex   = Enum.sum(Enum.map(ranked, & &1.capex_usd))
+IO.puts(String.duplicate("─", 102))
+IO.puts(String.pad_trailing("TOTAL", 79) <>
+        String.pad_leading("$#{trunc(total_savings)}", 12) <>
+        String.pad_leading("$#{trunc(total_capex)}", 10))
+IO.puts("\nOverall payback: #{Float.round(total_capex / total_savings, 1)} years")
+```
+
+```elixir
+# CO₂ reduction from all savings
+total_kwh_saved = total_savings / 0.12   # assuming 0.12 USD/kWh avg
+co2_saved_t     = EnergyX.Units.kwh_to_co2_kg(total_kwh_saved, 0.453) / 1000
+
+scope2_before = EnergyX.Carbon.GHGAccounting.scope2_emissions(%{
+  electricity_kwh: 28_500_000.0 * 0.40, grid_factor_kgco2_kwh: 0.453})
+co2_scope2_before = scope2_before.co2_t
+
+IO.puts("""
+
+CO₂ Impact:
+  Estimated energy saved:  #{Float.round(total_kwh_saved / 1000, 0) |> trunc()} MWh/yr
+  CO₂ reduction:           #{Float.round(co2_saved_t, 0) |> trunc()} t CO₂/yr
+  Scope 2 before:          #{Float.round(co2_scope2_before, 0) |> trunc()} t CO₂/yr (electricity)
+  Scope 2 reduction:       #{Float.round(co2_saved_t / co2_scope2_before * 100, 1)}% of current Scope 2
+
+SCC-weighted benefit (USD 130/t CO₂, IEA NZ2050):
+  Social value: USD #{Float.round(co2_saved_t * 130, 0) |> trunc()}/yr
+""")
+```
+
+---
+
+## 8. Water-Energy Nexus — Desalination
+
+```elixir
+# RO desalination plant
+ro = EnergyX.WaterEnergy.Desalination.ro_energy(%{
+  feed_pressure_bar: 65.0, recovery: 0.45,
+  eta_pump: 0.85, erd_efficiency: 0.96, source: :seawater})
+
+lcow = EnergyX.WaterEnergy.Desalination.lcow(%{
+  capacity_m3_d: 50_000.0, capex_usd_m3_per_day: 1400.0,
+  sec_kwh_m3: ro.sec_with_erd_kwh_m3, elec_price: 0.08,
+  hours_d: 20.0, discount_rate: 0.06, lifetime_yr: 25})
+
+IO.puts("""
+SWRO Desalination Plant — 50,000 m³/day:
+  SEC (no ERD):    #{ro.sec_without_erd_kwh_m3} kWh/m³
+  SEC (with ERD):  #{ro.sec_with_erd_kwh_m3} kWh/m³ (#{ro.erd_saving_pct}% saving)
+  Benchmark:       #{ro.benchmark.typical} kWh/m³ (typical)
+
+  LCOW = USD #{lcow.lcow_usd_m3}/m³
+  CAPEX total:     USD #{trunc(lcow.capex_total_usd / 1_000_000)} M
+""")
+```
+
+---
+
+## 9. Transportation — EV vs ICE Full Comparison
+
+```elixir
+tco = EnergyX.Transportation.ElectricVehicle.tco_comparison(%{
+  ev_price: 35_000, ice_price: 25_000,
+  ev_kwh_100km: 17.0, ice_l_100km: 7.5,
+  elec_price: 0.14, fuel_price: 1.65,
+  km_yr: 15_000,
+  ev_maintenance_yr: 350, ice_maintenance_yr: 900,
+  years: 5})
+
+IO.puts("""
+EV vs ICE Vehicle — 5-Year TCO (15,000 km/yr):
+  EV 5-yr TCO:    USD #{tco.ev_5yr_tco_usd}
+  ICE 5-yr TCO:   USD #{tco.ice_5yr_tco_usd}
+  EV saves:       USD #{tco.ev_saves_usd}
+  Breakeven:      Year #{tco.breakeven_years}
+  Annual fuel saving: USD #{tco.annual_fuel_saving}/yr
+""")
+
+# Road load breakdown
+load = EnergyX.Transportation.ElectricVehicle.road_load_power(%{
+  mass_kg: 1800.0, speed_km_h: 120.0, cd: 0.27,
+  a_frontal_m2: 2.4, crr: 0.012, grade_pct: 0.0})
+
+IO.puts("""
+EV Road Load at 120 km/h (1800 kg, Cd=0.27):
+  Aero drag:       #{load.aero_power_kw} kW  (#{Float.round(load.aero_power_kw / load.total_power_kw * 100, 0) |> trunc()}%)
+  Rolling resist:  #{load.rolling_power_kw} kW
+  Total:           #{load.total_power_kw} kW
+  Consumption:     #{load.consumption_kwh_100km} kWh/100km
+""")
+```
+
+---
+
+## 10. Unit Conversions & Constants Reference
+
+```elixir
+IO.puts("Physical Constants (EnergyX.Constants):")
+IO.puts("  Stefan-Boltzmann σ: #{EnergyX.Constants.stefan_boltzmann()} W/(m²·K⁴)")
+IO.puts("  Faraday F:          #{EnergyX.Constants.faraday()} C/mol")
+IO.puts("  Solar constant:     #{EnergyX.Constants.solar_constant()} W/m²")
+IO.puts("  Betz limit:         #{Float.round(EnergyX.Constants.betz_limit(), 6)} (16/27)")
+IO.puts("")
+
+IO.puts("Unit Conversions (EnergyX.Units):")
+IO.puts("  1 kWh → MJ:      #{EnergyX.Units.kwh_to_mj(1.0)} MJ")
+IO.puts("  1 toe → kWh:     #{EnergyX.Units.toe_to_kwh(1.0)} kWh")
+IO.puts("  25°C → K:        #{EnergyX.Units.celsius_to_kelvin(25.0)} K")
+IO.puts("  10 bar → Pa:     #{EnergyX.Units.bar_to_pa(10.0)} Pa")
+IO.puts("  100 hp → kW:     #{Float.round(EnergyX.Units.hp_to_kw(100.0), 2)} kW")
+```
+
+---
+
+## ✅ Library Summary
+
+```elixir
+IO.puts("""
+╔══════════════════════════════════════════════════════════════════╗
+║                 EnergyX v1.0.0 — Library Summary
+╠══════════════════════════════════════════════════════════════════╣
+║  Submodules:    72 across 20 engineering domains
+║  Public fns:    445+ documented functions
+║  Notebooks:     10 interactive Livebook notebooks
+║
+║  Domains covered:
+║  ✓ Renewable   Solar/Wind/Wave/Tidal/OTEC/Hydro/Geo/Biomass
+║  ✓ Fossil      Combustion/Coal/Gas Turbine/CCGT/Petroleum
+║  ✓ Nuclear     Fission/Fuel cycles/SMR/Fusion/Boron
+║  ✓ Hydrogen    Nernst/PEM/Electrolysis/Storage
+║  ✓ Storage     Li-ion/Pumped hydro/Flywheel/PCM
+║  ✓ HVAC        Psychrometrics/Vapor comp./Absorption/Tower
+║  ✓ Electrical  Motors/VFD/PF/Transformers/Lighting/Grid
+║  ✓ Thermal     Thermo/HT/Fluid mechanics/14 dim. numbers
+║  ✓ Industrial  Pinch/Compressed air/Steam/Kilns/Bond's law
+║  ✓ Building    UA/Degree days/Loads/EUI/Retrofit
+║  ✓ PV Apps     Residential sizing/Industrial/PPA/Grid svcs
+║  ✓ Exergy      SPECO/f-factor/Advanced/Grassmann
+║  ✓ Transport   EV road load/Aviation Breguet/IMO CII
+║  ✓ Water       RO/MSF/MED/LCOW/Water treatment
+║  ✓ Carbon      GHG Scope1-3/LCA/CCS/DAC/ETS/SCC
+║  ✓ Finance     DSCR/WACC/IRR/Monte Carlo LCOE P5-P95
+║  ✓ Microgrids  Sizing/Dispatch/VPP/LOLP
+║  ✓ Economics   LCOE/NPV/IRR/CRF/Sensitivity/Benchmarks
+║  ✓ Audit       ISO 50001/EI/Opportunity ranking
+║  ✓ Utilities   Units/Constants
+╚══════════════════════════════════════════════════════════════════╝
+""")
+```
+
+---
+
+*📖 End of EnergyX Interactive Notebook Series — github.com/dr-mitochondria/energyx*

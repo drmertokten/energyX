@@ -1,0 +1,196 @@
+# Notebook 08 — Energy Economics & Project Finance
+<!-- livebook:{"persist_outputs":true} -->
+
+# 💰 EnergyX — Notebook 08
+## LCOE, NPV, IRR, Monte Carlo & Project Finance Structuring
+
+```elixir
+Mix.install([
+  {:energyx, "~> 1.0"},
+  {:kino, "~> 0.12"},
+  {:kino_vega_lite, "~> 0.1"},
+  {:vega_lite, "~> 0.1"}
+])
+alias VegaLite, as: Vl
+```
+
+## 1. LCOE Calculator
+
+```elixir
+capex_input  = Kino.Input.number("CAPEX (USD)",              default: 1_500_000)
+opex_input   = Kino.Input.number("Annual OPEX (USD/yr)",     default: 30_000)
+aep_input    = Kino.Input.number("Annual Energy (kWh/yr)",   default: 2_200_000)
+rate_input   = Kino.Input.number("Discount Rate (%)",        default: 7.0)
+life_input   = Kino.Input.number("Project Lifetime (yr)",    default: 25)
+Kino.Layout.grid([capex_input, opex_input, aep_input, rate_input, life_input], columns: 3)
+```
+
+```elixir
+capex  = Kino.Input.read(capex_input)
+opex   = Kino.Input.read(opex_input)
+aep    = Kino.Input.read(aep_input)
+rate   = Kino.Input.read(rate_input) / 100.0
+life   = Kino.Input.read(life_input)
+
+lcoe  = EnergyX.Economics.lcoe(%{capex: capex, opex_annual: opex, aep: aep,
+                                   discount_rate: rate, lifetime_years: life})
+crf_r = EnergyX.Economics.crf(%{discount_rate: rate, lifetime_years: life})
+
+IO.puts("""
+╔══════════════════════════════════════════════════════╗
+║    LCOE CALCULATION RESULTS
+╠══════════════════════════════════════════════════════╣
+║  Capital Recovery Factor:    #{Float.round(crf_r.crf, 5)}
+║  Annualised CAPEX:           USD #{trunc(lcoe.annualized_capex_usd)}/yr
+║  Annual OPEX:                USD #{trunc(lcoe.opex_annual_usd)}/yr
+║  ─────────────────────────────────────────────
+║  LCOE:   #{lcoe.lcoe_usd_per_kwh * 100 |> Float.round(3)} ¢/kWh
+║          #{lcoe.lcoe_usd_per_mwh} USD/MWh
+║
+║  CAPEX share: #{lcoe.capex_share_pct}% | OPEX share: #{lcoe.opex_share_pct}%
+╚══════════════════════════════════════════════════════╝
+""")
+```
+
+```elixir
+# LCOE sensitivity to discount rate
+sens = EnergyX.Economics.lcoe_sensitivity(%{
+  base_params: %{capex: capex, opex_annual: opex, aep: aep,
+                  discount_rate: rate, lifetime_years: life},
+  param: :discount_rate,
+  sweep_values: Enum.map(1..15, & &1 / 100.0)
+})
+
+sens_data = Enum.map(sens.sensitivity, fn s ->
+  %{"Discount Rate (%)" => Float.round(s.param_value * 100, 0),
+    "LCOE (USD/MWh)"    => s.lcoe_usd_per_mwh}
+end)
+
+Vl.new(width: 600, height: 300, title: "LCOE Sensitivity to Discount Rate")
+|> Vl.data_from_values(sens_data)
+|> Vl.mark(:line, color: "#1F4E79", stroke_width: 2.5, point: true)
+|> Vl.encode_field(:x, "Discount Rate (%)", type: :quantitative)
+|> Vl.encode_field(:y, "LCOE (USD/MWh)", type: :quantitative)
+|> Kino.VegaLite.new()
+```
+
+## 2. NPV & IRR — Project Cash Flow Analysis
+
+```elixir
+n_years  = life
+revenues = Enum.map(1..n_years, fn yr ->
+  aep * 0.13 * (1 + 0.035) ** (yr - 1) * (1 - 0.005) ** (yr - 1)
+end)
+
+npv_res = EnergyX.Economics.npv(%{
+  initial_investment: capex, cash_flows: revenues, discount_rate: rate})
+irr_res = EnergyX.Economics.irr(%{
+  initial_investment: capex, cash_flows: revenues})
+pb_res  = EnergyX.Economics.simple_payback(%{capex: capex, annual_savings: List.first(revenues)})
+
+IO.puts("""
+Project Financial Analysis (#{n_years}-year, price=0.13 USD/kWh, +3.5%/yr, −0.5%/yr deg.):
+  NPV (at #{rate*100}%): USD #{trunc(npv_res.npv_usd)}
+  Profitable: #{npv_res.profitable}
+  IRR: #{Float.round(irr_res.irr * 100, 2)}%
+  Simple payback: #{pb_res.payback_years} years
+""")
+
+# Cumulative NPV chart
+cum_npv_data =
+  revenues
+  |> Enum.with_index(1)
+  |> Enum.scan({0, -capex}, fn {cf, yr}, {_, prev} ->
+    pv = cf / (1 + rate) ** yr
+    {yr, Float.round(prev + pv, 0)}
+  end)
+  |> Enum.map(fn {yr, cum} -> %{"Year" => yr, "Cumulative NPV (USD)" => cum} end)
+
+Vl.new(width: 650, height: 300, title: "Cumulative Discounted Cash Flow (NPV)")
+|> Vl.data_from_values([%{"Year" => 0, "Cumulative NPV (USD)" => -capex} | cum_npv_data])
+|> Vl.mark(:area, color: "#548235", opacity: 0.65, line: %{color: "#375623", stroke_width: 2})
+|> Vl.encode_field(:x, "Year", type: :quantitative)
+|> Vl.encode_field(:y, "Cumulative NPV (USD)", type: :quantitative)
+|> Kino.VegaLite.new()
+```
+
+## 3. Monte Carlo LCOE — Probabilistic Analysis
+
+```elixir
+n_sim_input = Kino.Input.number("Number of simulations", default: 5000)
+Kino.render(n_sim_input)
+n_sim = Kino.Input.read(n_sim_input)
+
+mc = EnergyX.ProjectFinance.MonteCarlo.run_lcoe(%{
+  n_simulations: n_sim,
+  params: %{
+    capex:         %{mean: capex,    std_pct: 15},
+    opex_annual:   %{mean: opex,     std_pct: 10},
+    aep:           %{mean: aep,      std_pct: 8},
+    discount_rate: %{mean: rate,     std_pct: 20},
+    lifetime:      %{mean: life * 1.0, std_pct: 5}
+  }
+})
+
+IO.puts("""
+Monte Carlo LCOE Distribution (N = #{n_sim}):
+  P5:   #{mc.p5_usd_mwh} USD/MWh
+  P25:  #{mc.p25_usd_mwh} USD/MWh
+  P50:  #{mc.p50_usd_mwh} USD/MWh  ← median
+  P75:  #{mc.p75_usd_mwh} USD/MWh
+  P95:  #{mc.p95_usd_mwh} USD/MWh
+  Mean: #{mc.mean_lcoe_usd_mwh} USD/MWh | CV: #{mc.cv_pct}%
+""")
+```
+
+## 4. Global LCOE Benchmarks (2024)
+
+```elixir
+benchmarks = EnergyX.Economics.lcoe_benchmarks()
+
+bench_data = Enum.map(benchmarks, fn {tech, data} ->
+  %{"Technology"   => tech |> Atom.to_string() |> String.replace("_", " "),
+    "Min (USD/MWh)" => data.min,
+    "Max (USD/MWh)" => data.max,
+    "Mid (USD/MWh)" => div(data.min + data.max, 2)}
+end) |> Enum.sort_by(& &1["Mid (USD/MWh)"])
+
+Vl.new(width: 680, height: 380, title: "Global LCOE Benchmarks 2024 (IRENA)")
+|> Vl.data_from_values(bench_data)
+|> Vl.mark(:bar, opacity: 0.85)
+|> Vl.encode_field(:y, "Technology", type: :nominal, sort: "x")
+|> Vl.encode_field(:x, "Min (USD/MWh)", type: :quantitative, title: "LCOE (USD/MWh)")
+|> Vl.encode_field(:x2, "Max (USD/MWh)")
+|> Kino.VegaLite.new()
+```
+
+## 5. Project Finance — DSCR & Capital Structure
+
+```elixir
+fin = EnergyX.ProjectFinance.FinancialStructure.capital_structure(%{
+  capex_usd: capex, debt_pct: 70.0, debt_rate: 0.055,
+  equity_rate: 0.12, tax_rate: 0.20, lifetime_yr: life})
+
+IO.puts("""
+Project Finance Structure (70% debt / 30% equity):
+  Debt:              USD #{trunc(fin.debt_usd)}
+  Equity:            USD #{trunc(fin.equity_usd)}
+  Annual debt service: USD #{trunc(fin.annual_debt_service)}/yr
+  WACC (after-tax):  #{fin.wacc_pct}%
+
+DSCR Check:
+""")
+
+annual_rev = List.first(revenues)
+dscr_res   = EnergyX.ProjectFinance.FinancialStructure.dscr(%{
+  cfads_usd: annual_rev - opex,
+  principal_usd: fin.annual_debt_service * 0.60,
+  interest_usd:  fin.annual_debt_service * 0.40})
+
+IO.puts("  CFADS: USD #{trunc(annual_rev - opex)}/yr")
+IO.puts("  DSCR:  #{dscr_res.dscr}x  (#{if dscr_res.bankable, do: "✓ BANKABLE", else: "✗ Below 1.25x"})")
+```
+
+---
+
+*📘 Continue to Notebook 09 — Exergy & Thermoeconomics*

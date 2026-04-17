@@ -1,0 +1,265 @@
+# Notebook 04 — Fossil Fuels, Nuclear & Hydrogen
+<!-- livebook:{"persist_outputs":true} -->
+
+# 🔥 EnergyX — Notebook 04
+## Combustion, Gas Turbines, Coal, Nuclear & Fuel Cells
+
+```elixir
+Mix.install([
+  {:energyx, "~> 1.0"},
+  {:kino, "~> 0.12"},
+  {:kino_vega_lite, "~> 0.1"},
+  {:vega_lite, "~> 0.1"}
+])
+alias VegaLite, as: Vl
+```
+
+---
+
+## 1. Combustion Stoichiometry
+
+```elixir
+# Bituminous coal typical ultimate analysis (as-received, dry)
+coal_props = EnergyX.Fossil.Coal.coal_properties()
+IO.puts("Coal properties reference:")
+Enum.each(coal_props, fn {grade, props} ->
+  IO.puts("  #{grade}: LHV=#{props.lhv_mj_kg} MJ/kg, C=#{props.carbon_pct}%, Ash=#{props.ash_pct}%")
+end)
+```
+
+```elixir
+# User-defined fuel
+c_input  = Kino.Input.number("Carbon fraction (mass %)",   default: 72.0)
+h_input  = Kino.Input.number("Hydrogen fraction (mass %)", default: 4.5)
+o_input  = Kino.Input.number("Oxygen fraction (mass %)",   default: 7.0)
+s_input  = Kino.Input.number("Sulfur fraction (mass %)",   default: 2.0)
+ea_input = Kino.Input.number("Excess air (%)",             default: 20.0)
+Kino.Layout.grid([c_input, h_input, o_input, s_input, ea_input], columns: 3)
+```
+
+```elixir
+c  = Kino.Input.read(c_input)  / 100.0
+h  = Kino.Input.read(h_input)  / 100.0
+o  = Kino.Input.read(o_input)  / 100.0
+s  = Kino.Input.read(s_input)  / 100.0
+ea = Kino.Input.read(ea_input)
+
+afr_stoich = EnergyX.Fossil.Combustion.stoichiometric_afr(%{c: c, h: h, o: o, s: s})
+hv         = EnergyX.Fossil.Combustion.heating_value(%{c: c, h: h, o: o, s: s})
+flue       = EnergyX.Fossil.Combustion.flue_gas_composition(%{c: c, h: h, o: o, s: s, ea: ea})
+
+IO.puts("""
+Combustion Analysis:
+  AFR (stoichiometric): #{afr_stoich.afr_stoich} kg_air/kg_fuel
+  LHV: #{hv.lhv_kj_kg} kJ/kg | HHV: #{hv.hhv_kj_kg} kJ/kg
+  CO₂ in flue gas (dry): #{flue.co2_pct}%
+  O₂ in flue gas:        #{flue.o2_pct}%
+  SO₂:                   #{flue.so2_pct}%
+""")
+```
+
+---
+
+## 2. Gas Turbine — Brayton Cycle
+
+```elixir
+rp_data =
+  Enum.map(2..40, fn rp ->
+    ideal  = EnergyX.Thermal.Thermodynamics.brayton_efficiency(%{pressure_ratio: rp * 1.0})
+    actual = EnergyX.Fossil.NaturalGas.gas_turbine(%{
+               pressure_ratio: rp * 1.0, t_inlet_c: 15.0,
+               t_turbine_inlet_c: 1350.0, eta_comp: 0.87, eta_turb: 0.88})
+    ccgt   = EnergyX.Fossil.NaturalGas.ccgt_efficiency(%{
+               eta_gt: actual.eta_actual, eta_hrsg: 0.92, eta_steam: 0.35})
+    %{"Pressure Ratio" => rp,
+      "Ideal Brayton (%)"  => Float.round(ideal.eta_pct, 2),
+      "Actual GT (%)"      => Float.round(actual.eta_actual * 100, 2),
+      "CCGT (%)"           => Float.round(ccgt.eta_combined * 100, 2)}
+  end)
+
+Vl.new(width: 650, height: 360, title: "Gas Turbine & CCGT Efficiency vs Pressure Ratio")
+|> Vl.data_from_values(rp_data)
+|> Vl.transform(fold: ["Ideal Brayton (%)", "Actual GT (%)", "CCGT (%)"],
+                as: ["Cycle", "Efficiency (%)"])
+|> Vl.mark(:line, stroke_width: 2)
+|> Vl.encode_field(:x, "Pressure Ratio", type: :quantitative)
+|> Vl.encode_field(:y, "Efficiency (%)", type: :quantitative, scale: [domain: [0, 70]])
+|> Vl.encode_field(:color, "Cycle", type: :nominal)
+|> Kino.VegaLite.new()
+```
+
+---
+
+## 3. Coal Power Plant — Boiler Efficiency & Emissions
+
+```elixir
+t_flue_input = Kino.Input.number("Flue gas temperature (°C)", default: 160)
+o2_pct_input = Kino.Input.number("O₂ in flue gas (%)",       default: 4.5)
+t_amb_input  = Kino.Input.number("Ambient temperature (°C)",  default: 15)
+Kino.Layout.grid([t_flue_input, o2_pct_input, t_amb_input], columns: 3)
+```
+
+```elixir
+t_flue = Kino.Input.read(t_flue_input)
+o2_pct = Kino.Input.read(o2_pct_input)
+t_amb  = Kino.Input.read(t_amb_input)
+
+siegert = EnergyX.Fossil.Coal.siegert_flue_loss(%{
+  t_flue_c: t_flue, t_ambient_c: t_amb, o2_pct: o2_pct, fuel_type: :bituminous_coal})
+boiler  = EnergyX.Fossil.Coal.boiler_efficiency_indirect(%{
+  q_dry_flue: siegert.flue_loss_pct, q_moisture: 1.2, q_radiation: 0.8, q_other: 0.3})
+
+benchmarks = EnergyX.Fossil.Coal.plant_efficiency_benchmarks()
+
+IO.puts("""
+Boiler Efficiency (Indirect Method):
+  Flue gas loss (Siegert): #{siegert.flue_loss_pct}%
+  Overall boiler η:        #{boiler.boiler_efficiency_pct}%
+
+Plant Benchmarks:
+  Sub-critical:    #{benchmarks.subcritical.typical_efficiency_pct}%
+  Super-critical:  #{benchmarks.supercritical.typical_efficiency_pct}%
+  Ultra-super:     #{benchmarks.ultra_supercritical.typical_efficiency_pct}%
+""")
+
+# Flue loss vs temperature sweep
+flue_sweep =
+  Enum.map(100..300//5, fn t ->
+    s = EnergyX.Fossil.Coal.siegert_flue_loss(%{
+          t_flue_c: t * 1.0, t_ambient_c: t_amb * 1.0, o2_pct: o2_pct * 1.0,
+          fuel_type: :bituminous_coal})
+    %{"Flue Gas T (°C)" => t, "Flue Loss (%)" => s.flue_loss_pct}
+  end)
+
+Vl.new(width: 600, height: 280, title: "Siegert Flue Gas Loss vs Temperature")
+|> Vl.data_from_values(flue_sweep)
+|> Vl.mark(:line, color: "#C00000", stroke_width: 2.5)
+|> Vl.encode_field(:x, "Flue Gas T (°C)", type: :quantitative)
+|> Vl.encode_field(:y, "Flue Loss (%)", type: :quantitative)
+|> Kino.VegaLite.new()
+```
+
+---
+
+## 4. Nuclear Reactor — Four-Factor Formula
+
+```elixir
+IO.puts("Four-Factor Formula: k_eff = η · ε · p · f · P_NL")
+
+eta_input = Kino.Input.number("η (reproduction factor)", default: 2.02)
+eps_input = Kino.Input.number("ε (fast fission)",        default: 1.05)
+p_input   = Kino.Input.number("p (resonance escape)",    default: 0.80)
+f_input   = Kino.Input.number("f (thermal utilisation)", default: 0.71)
+pnl_input = Kino.Input.number("P_NL (non-leakage)",      default: 0.97)
+Kino.Layout.grid([eta_input, eps_input, p_input, f_input, pnl_input], columns: 3)
+```
+
+```elixir
+ff = EnergyX.Nuclear.Advanced.four_factor_formula(%{
+  eta: Kino.Input.read(eta_input),
+  epsilon: Kino.Input.read(eps_input),
+  p_res: Kino.Input.read(p_input),
+  f: Kino.Input.read(f_input),
+  p_nl: Kino.Input.read(pnl_input)
+})
+
+IO.puts("""
+Reactor Criticality Analysis:
+  k_∞ = #{ff.k_inf}
+  k_eff = #{ff.k_eff}
+  Reactivity ρ = #{ff.reactivity_pcm} pcm
+  Status: #{ff.status}
+""")
+
+# Radioactive decay example — Cs-137
+decay = EnergyX.Nuclear.radioactive_decay(%{n0: 1.0e12, half_life: 30.17, t: 100.0})
+IO.puts("Cs-137 decay (t½=30.17 yr, t=100 yr):")
+IO.puts("  Remaining fraction: #{Float.round(decay.fraction_left * 100, 3)}%")
+IO.puts("  Half-lives elapsed: #{decay.half_lives_elapsed}")
+```
+
+---
+
+## 5. PEM Fuel Cell — Polarisation Curve
+
+```elixir
+i_range = Enum.map(1..200, & &1 / 100.0)  # 0.01 to 2.0 A/cm²
+
+polarisation_data =
+  Enum.map(i_range, fn i ->
+    cell = EnergyX.Hydrogen.FuelCell.pem_cell_voltage(%{
+      e_rev: 1.18, current_density: i, i0: 1.0e-3,
+      alpha: 0.5, r_ohm: 0.15, i_lim: 1.8, t_k: 353.15
+    })
+    %{"Current (A/cm²)" => i,
+      "Cell Voltage (V)"       => cell.cell_voltage_v,
+      "Power (W/cm²)"          => cell.power_density_w_cm2}
+  end)
+
+Vl.new(width: 650, height: 360, title: "PEM Fuel Cell Polarisation Curve (80°C)")
+|> Vl.data_from_values(polarisation_data)
+|> Vl.layers([
+  Vl.new() |> Vl.mark(:line, color: "#2E75B6", stroke_width: 2.5)
+    |> Vl.encode_field(:x, "Current (A/cm²)", type: :quantitative)
+    |> Vl.encode_field(:y, "Cell Voltage (V)", type: :quantitative,
+                       scale: [domain: [0.0, 1.3]]),
+  Vl.new() |> Vl.mark(:line, color: "#ED7D31", stroke_width: 2, stroke_dash: [5,3])
+    |> Vl.encode_field(:x, "Current (A/cm²)", type: :quantitative)
+    |> Vl.encode_field(:y, "Power (W/cm²)", type: :quantitative)
+])
+|> Kino.VegaLite.new()
+```
+
+---
+
+## 6. Hydrogen Production & Storage Comparison
+
+```elixir
+electro = EnergyX.Hydrogen.FuelCell.electrolyser_h2_production(%{
+  current_a: 1000.0, n_cells: 50, v_cell: 1.80, faradaic_eff: 0.97
+})
+
+IO.puts("""
+PEM Electrolyser (50-cell stack, I=1000 A, V_cell=1.80 V):
+  H₂ production:    #{electro.h2_mass_rate_kg_h} kg/h
+  Stack power:       #{electro.stack_power_kw} kW
+  Specific energy:   #{electro.specific_energy_kwh_kg} kWh/kg H₂
+  LHV efficiency:    #{Float.round(electro.efficiency_lhv * 100, 1)}%
+""")
+
+storage = EnergyX.Hydrogen.FuelCell.h2_storage_comparison()
+IO.puts("H₂ Storage Technology Comparison:")
+Enum.each(storage, fn {tech, data} ->
+  IO.puts("  #{tech}: #{data.gravimetric_wh_kg} Wh/kg | #{data.volumetric_wh_l} Wh/L")
+end)
+```
+
+---
+
+## 7. CO₂ Emissions — Technology Comparison
+
+```elixir
+ipcc = EnergyX.Carbon.LCA.lifecycle_co2_factors()
+
+co2_data =
+  ipcc
+  |> Enum.map(fn {tech, data} ->
+    %{"Technology"   => tech |> Atom.to_string() |> String.replace("_", " "),
+      "Median (g/kWh)" => data.median,
+      "Min"            => data.min,
+      "Max"            => data.max}
+  end)
+  |> Enum.sort_by(& &1["Median (g/kWh)"])
+
+Vl.new(width: 680, height: 500, title: "Lifecycle CO₂ Intensity — IPCC AR6 (g CO₂eq/kWh)")
+|> Vl.data_from_values(co2_data)
+|> Vl.mark(:bar, opacity: 0.85)
+|> Vl.encode_field(:y, "Technology", type: :nominal, sort: "x")
+|> Vl.encode_field(:x, "Min", type: :quantitative)
+|> Vl.encode_field(:x2, "Max")
+|> Kino.VegaLite.new()
+```
+
+---
+
+*📘 Continue to Notebook 05 — HVAC & Psychrometrics*

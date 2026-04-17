@@ -1,0 +1,185 @@
+# Notebook 06 — Electrical Systems
+<!-- livebook:{"persist_outputs":true} -->
+
+# ⚡ EnergyX — Notebook 06
+## Motors, VFDs, Power Factor, Transformers, Lighting & Grid
+
+```elixir
+Mix.install([
+  {:energyx, "~> 1.0"},
+  {:kino, "~> 0.12"},
+  {:kino_vega_lite, "~> 0.1"},
+  {:vega_lite, "~> 0.1"}
+])
+alias VegaLite, as: Vl
+```
+
+## 1. Motor Efficiency — IE Class Comparison
+
+```elixir
+motor_data =
+  for ie <- [:ie1, :ie2, :ie3, :ie4, :ie5],
+      p  <- [0.75, 1.5, 2.2, 4, 7.5, 11, 15, 22, 37, 55, 75, 110, 160, 200] do
+    m = EnergyX.Electrical.Motors.ie_efficiency(p, ie)
+    %{"Power (kW)" => p, "Efficiency (%)" => m.efficiency_pct, "IE Class" => ie}
+  end
+
+Vl.new(width: 650, height: 360, title: "Motor Efficiency by IE Class (IEC 60034-30-1)")
+|> Vl.data_from_values(motor_data)
+|> Vl.mark(:line, stroke_width: 2)
+|> Vl.encode_field(:x, "Power (kW)", type: :quantitative, scale: [type: "log"])
+|> Vl.encode_field(:y, "Efficiency (%)", type: :quantitative, scale: [domain: [75, 100]])
+|> Vl.encode_field(:color, "IE Class", type: :nominal)
+|> Kino.VegaLite.new()
+```
+
+## 2. VFD Savings — Affinity Law
+
+```elixir
+p_input = Kino.Input.number("Motor rated power (kW)", default: 55.0)
+Kino.render(p_input)
+p_rated = Kino.Input.read(p_input)
+
+vfd_data =
+  Enum.map(10..100, fn pct ->
+    sr = pct / 100.0
+    v  = EnergyX.Electrical.VFD.vfd_vs_throttle(%{rated_power_kw: p_rated, speed_ratio: sr})
+    %{"Speed (%)"        => pct,
+      "VFD power (kW)"   => v.power_with_vfd_kw,
+      "Throttle (kW)"    => v.power_throttled_kw,
+      "Saving (kW)"      => max(v.instantaneous_saving_kw, 0.0)}
+  end)
+
+Vl.new(width: 650, height: 340, title: "VFD vs Throttle Control — #{p_rated} kW Motor")
+|> Vl.data_from_values(vfd_data)
+|> Vl.transform(fold: ["VFD power (kW)", "Throttle (kW)"], as: ["Control", "Power (kW)"])
+|> Vl.mark(:line, stroke_width: 2.5)
+|> Vl.encode_field(:x, "Speed (%)", type: :quantitative)
+|> Vl.encode_field(:y, "Power (kW)", type: :quantitative)
+|> Vl.encode_field(:color, "Control", type: :nominal)
+|> Kino.VegaLite.new()
+```
+
+## 3. Power Factor Correction
+
+```elixir
+pf1_input = Kino.Input.number("Existing power factor", default: 0.72)
+pf2_input = Kino.Input.number("Target power factor",   default: 0.95)
+p_kw_inp  = Kino.Input.number("Active load (kW)",      default: 500.0)
+Kino.Layout.grid([pf1_input, pf2_input, p_kw_inp], columns: 3)
+```
+
+```elixir
+pf1 = Kino.Input.read(pf1_input)
+pf2 = Kino.Input.read(pf2_input)
+pkw = Kino.Input.read(p_kw_inp)
+
+cap = EnergyX.Electrical.PowerFactor.capacitor_sizing(%{p_kw: pkw, pf_from: pf1, pf_to: pf2})
+sav = EnergyX.Electrical.PowerFactor.pf_correction_savings(%{
+  p_kw: pkw, pf_from: pf1, pf_to: pf2,
+  demand_charge_usd_kva: 8.0, hours_yr: 8760, r_ohm_per_phase: 0.01})
+
+IO.puts("""
+Power Factor Correction #{pf1} → #{pf2}:
+  Capacitor bank required: #{cap.capacitor_kvar} kVAr
+  Current reduction:       #{cap.current_reduction_pct}%
+  Line loss reduction:     #{cap.loss_reduction_pct}%
+  Est. capacitor cost:     USD #{cap.typical_cap_cost_usd}
+
+Annual Savings:
+  Demand charge savings:   USD #{sav.annual_demand_savings_usd}/yr
+  Line loss savings:       #{sav.annual_loss_savings_kwh} kWh/yr
+  Total savings:           USD #{sav.total_annual_savings_usd}/yr
+""")
+```
+
+## 4. Transformer — Efficiency & Optimal Loading
+
+```elixir
+# Distribution transformer: 1000 kVA, P_fe=1.2 kW, P_cu=10 kW
+tf = EnergyX.Electrical.Transformer.efficiency(%{
+  s_rated_kva: 1000.0, s_load_kva: 650.0, pf_load: 0.92,
+  p_fe_w: 1200.0, p_cu_rated_w: 10_000.0})
+opt = EnergyX.Electrical.Transformer.optimal_loading(%{
+  p_fe_w: 1200.0, p_cu_rated_w: 10_000.0, s_rated_kva: 1000.0})
+
+IO.puts("""
+Distribution Transformer (1000 kVA):
+  At 65% load, PF=0.92:
+    Efficiency:          #{tf.efficiency_pct}%
+    Iron losses:         #{tf.iron_loss_w} W
+    Copper losses:       #{tf.copper_loss_w} W
+
+  Optimal loading:  #{opt.optimal_load_ratio * 100 |> Float.round(1)}% = #{opt.optimal_load_kva} kVA
+  (#{opt.note})
+""")
+
+# Efficiency curve
+tf_curve =
+  Enum.map(5..100//5, fn load_pct ->
+    r = EnergyX.Electrical.Transformer.efficiency(%{
+      s_rated_kva: 1000.0, s_load_kva: load_pct * 10.0, pf_load: 0.92,
+      p_fe_w: 1200.0, p_cu_rated_w: 10_000.0})
+    %{"Load (%)" => load_pct, "Efficiency (%)" => r.efficiency_pct}
+  end)
+
+Vl.new(width: 600, height: 280, title: "Transformer Efficiency vs Load (1000 kVA)")
+|> Vl.data_from_values(tf_curve)
+|> Vl.mark(:line, color: "#548235", stroke_width: 2.5)
+|> Vl.encode_field(:x, "Load (%)", type: :quantitative)
+|> Vl.encode_field(:y, "Efficiency (%)", type: :quantitative, scale: [domain: [96, 100]])
+|> Kino.VegaLite.new()
+```
+
+## 5. Lighting — Technology Comparison
+
+```elixir
+lamps = [
+  %{technology: :incandescent,  power_w: 60,   lumens: 780,  lifetime_h: 1_000,  lamp_cost_usd: 1.0},
+  %{technology: :fluorescent_t8,power_w: 18,   lumens: 1600, lifetime_h: 20_000, lamp_cost_usd: 5.0},
+  %{technology: :led_2020s,      power_w: 9,    lumens: 800,  lifetime_h: 25_000, lamp_cost_usd: 8.0},
+  %{technology: :led_highbay,    power_w: 150,  lumens: 24_000, lifetime_h: 50_000, lamp_cost_usd: 80.0},
+  %{technology: :hps,            power_w: 150,  lumens: 18_000, lifetime_h: 20_000, lamp_cost_usd: 25.0},
+  %{technology: :metal_halide,   power_w: 175,  lumens: 15_750, lifetime_h: 12_000, lamp_cost_usd: 30.0},
+]
+
+comparison = EnergyX.Electrical.Lighting.lamp_comparison(lamps, 4000, 0.13)
+
+lamp_data = Enum.map(comparison, fn r ->
+  %{"Technology"          => r.technology |> Atom.to_string() |> String.replace("_", " "),
+    "Efficacy (lm/W)"     => r.efficacy_lm_w,
+    "Annual energy (kWh)" => r.annual_energy_kwh,
+    "Annual cost (USD)"   => r.annual_total_cost_usd}
+end)
+
+Kino.DataTable.new(lamp_data)
+```
+
+## 6. Grid — Transmission Losses & Frequency Response
+
+```elixir
+# Transmission losses for a 100 MW line
+loss = EnergyX.Electrical.Grid.transmission_losses(%{
+  p_mw: 100.0, v_kv: 220.0, pf: 0.95, r_ohm_per_km: 0.08, length_km: 200.0})
+
+# Frequency response to a sudden load disturbance
+freq = EnergyX.Electrical.Grid.frequency_response(%{
+  delta_p_mw: 500.0, d: 1500.0, r: 0.05, h: 5.0, s_base_mva: 10_000.0})
+
+IO.puts("""
+Transmission (100 MW, 220 kV, 200 km, ACSR):
+  Losses:           #{loss.losses_mw} MW (#{loss.losses_pct}%)
+  Line current:     #{loss.line_current_a} A
+
+Grid Frequency Response (500 MW trip, H=5s):
+  Δf (steady-state): #{freq.frequency_deviation_hz} Hz
+  New frequency:     #{freq.new_frequency_hz} Hz
+  RoCoF:             #{freq.rocof_hz_per_s} Hz/s
+  Within limits:     #{freq.within_limits}
+  #{freq.note}
+""")
+```
+
+---
+
+*📘 Continue to Notebook 07 — Industrial Processes*

@@ -1,0 +1,232 @@
+# Notebook 07 — Industrial Processes & Energy Audit
+<!-- livebook:{"persist_outputs":true} -->
+
+# 🏭 EnergyX — Notebook 07
+## Pinch Analysis, Compressed Air, Steam Systems & Heavy Industry
+
+```elixir
+Mix.install([
+  {:energyx, "~> 1.0"},
+  {:kino, "~> 0.12"},
+  {:kino_vega_lite, "~> 0.1"},
+  {:vega_lite, "~> 0.1"}
+])
+alias VegaLite, as: Vl
+```
+
+## 1. Pinch Analysis — Interactive Process Integration
+
+```elixir
+IO.puts("""
+Problem Table Algorithm — Enter hot and cold stream data.
+Default example: chemical plant with 3 hot + 3 cold streams.
+""")
+
+dTmin_input = Kino.Input.number("ΔTmin (K)", default: 10.0)
+Kino.render(dTmin_input)
+
+dt_min = Kino.Input.read(dTmin_input)
+
+hot_streams = [
+  %{name: "H1 — Reactor effluent",   t_supply: 200.0, t_target: 40.0,  cp_kw_k: 40.0},
+  %{name: "H2 — Overhead vapour",     t_supply: 150.0, t_target: 30.0,  cp_kw_k: 60.0},
+  %{name: "H3 — Side-draw product",   t_supply: 110.0, t_target: 20.0,  cp_kw_k: 35.0},
+]
+cold_streams = [
+  %{name: "C1 — Feed preheat",        t_supply: 25.0,  t_target: 180.0, cp_kw_k: 50.0},
+  %{name: "C2 — Reboiler",            t_supply: 40.0,  t_target: 120.0, cp_kw_k: 30.0},
+  %{name: "C3 — Distillate cooler",   t_supply: 60.0,  t_target: 90.0,  cp_kw_k: 45.0},
+]
+
+result = EnergyX.IndustrialProcesses.PinchAnalysis.minimum_utility_targets(%{
+  hot_streams: hot_streams, cold_streams: cold_streams, delta_t_min: dt_min})
+
+IO.puts("""
+╔══════════════════════════════════════════════════════╗
+║    PINCH ANALYSIS RESULTS
+╠══════════════════════════════════════════════════════╣
+║  Minimum hot utility:   #{result.min_hot_utility_kw} kW
+║  Minimum cold utility:  #{result.min_cold_utility_kw} kW
+║  Pinch temperature:     #{result.pinch_temp_hot_c}°C (hot) / #{result.pinch_temp_cold_c}°C (cold)
+╚══════════════════════════════════════════════════════╝
+""")
+
+# Heat recovery potential
+recovery = EnergyX.IndustrialProcesses.PinchAnalysis.heat_recovery_potential(%{
+  current_hot_utility_kw: 2800.0, min_hot_utility_kw: result.min_hot_utility_kw,
+  utility_cost_usd_kwh: 0.035, hours_yr: 8000.0})
+
+IO.puts("""
+Heat Recovery Opportunity (current utility = 2800 kW):
+  Potential saving:      #{recovery.recovery_potential_kw} kW
+  Annual energy saved:   #{Float.round(recovery.annual_energy_saved_kwh/1000, 1)} MWh/yr
+  Annual savings:        USD #{recovery.annual_savings_usd}/yr
+  Simple payback:        #{recovery.simple_payback_years} years
+""")
+```
+
+```elixir
+# Show temperature intervals
+IO.puts("\nTemperature Intervals (Problem Table Algorithm):")
+IO.puts(String.pad_leading("T_hi", 8) <> String.pad_leading("T_lo", 8) <>
+        String.pad_leading("ΔH (kW)", 12) <> String.pad_leading("Cumulative", 14))
+IO.puts(String.duplicate("─", 44))
+Enum.each(result.temperature_intervals, fn iv ->
+  IO.puts(String.pad_leading("#{iv.t_hi}", 8) <>
+          String.pad_leading("#{iv.t_lo}", 8) <>
+          String.pad_leading("#{iv.delta_h}", 12) <>
+          String.pad_leading("#{iv.cumulative}", 14))
+end)
+```
+
+## 2. Compressed Air — Leak Survey
+
+```elixir
+n_leaks_input  = Kino.Input.number("Number of leak points found", default: 45)
+avg_hole_input = Kino.Input.number("Average hole size (mm²)",     default: 2.0)
+press_input    = Kino.Input.number("System pressure (bar g)",     default: 7.0)
+price_input    = Kino.Input.number("Electricity price (USD/kWh)", default: 0.10)
+Kino.Layout.grid([n_leaks_input, avg_hole_input, press_input, price_input], columns: 2)
+```
+
+```elixir
+leaks = EnergyX.IndustrialProcesses.CompressedAir.leak_cost(%{
+  n_leaks: Kino.Input.read(n_leaks_input),
+  avg_hole_mm2: Kino.Input.read(avg_hole_input),
+  pressure_bar: Kino.Input.read(press_input),
+  hours_yr: 8760,
+  elec_price: Kino.Input.read(price_input)
+})
+
+IO.puts("""
+Compressed Air Leak Survey Results:
+  Total leak flow:    #{leaks.total_leak_flow_m3_min} m³/min (free air)
+  Wasted power:       #{leaks.wasted_power_kw} kW
+  Annual waste:       #{leaks.annual_waste_kwh} kWh/yr
+  Annual cost:        USD #{leaks.annual_cost_usd}/yr
+  CO₂ waste:          #{leaks.co2_waste_t} t CO₂/yr
+""")
+
+# Multi-stage compression savings
+ms = EnergyX.IndustrialProcesses.CompressedAir.multistage_savings(%{
+  p_in_bar: 1.013, p_out_bar: 8.0, n_stages: 2,
+  m_kg_s: 1.0, t_in_k: 293.15})
+
+IO.puts("""
+2-Stage Compression (1→8 bar):
+  Single-stage: #{ms.single_stage_kw} kW
+  2-stage:      #{ms.multistage_kw} kW
+  Saving:       #{ms.saving_pct}%
+  Interstage pressure: #{ms.interstage_press} bar
+""")
+```
+
+## 3. Steam Systems — Trap Losses & Flash Recovery
+
+```elixir
+trap = EnergyX.IndustrialProcesses.SteamSystems.steam_trap_loss(%{
+  pressure_bar_g: 10.0, trap_size_mm: 8.0, steam_price_usd_t: 35.0, hours_yr: 8760})
+
+flash = EnergyX.IndustrialProcesses.SteamSystems.flash_steam_fraction(%{
+  t_condensate_c: 175.0, p_low_bar: 2.0})
+
+IO.puts("""
+Failed-Open Steam Trap (10 bar g, 8mm orifice):
+  Steam loss:   #{trap.steam_loss_kg_h} kg/h  (#{trap.steam_loss_t_yr} t/yr)
+  Energy lost:  #{trap.energy_loss_kw} kW
+  Annual cost:  USD #{trap.annual_cost_usd}/yr
+
+Flash Steam from 10-bar Condensate → 2-bar Flash Vessel:
+  Flash fraction:   #{trap.steam_loss_t_yr && flash.flash_pct}%
+  T_sat (2 bar):    #{flash.t_sat_low_c}°C
+  (#{flash.flash_pct}% of condensate re-vaporises as flash steam)
+""")
+```
+
+## 4. Bond's Law — Grinding Energy
+
+```elixir
+grinding_data = [
+  %{material: "Limestone",       wi: 10.2},
+  %{material: "Gold ore",        wi: 14.0},
+  %{material: "Clinker",         wi: 13.5},
+  %{material: "Coal",            wi: 11.4},
+  %{material: "Iron ore",        wi: 15.4},
+  %{material: "Granite",         wi: 15.1},
+  %{material: "Gypsum",          wi: 6.9},
+  %{material: "Salt",            wi: 8.8},
+]
+
+p80_input = Kino.Input.number("Product size P₈₀ (μm)", default: 100.0)
+f80_input = Kino.Input.number("Feed size F₈₀ (μm)",    default: 10_000.0)
+Kino.Layout.grid([p80_input, f80_input], columns: 2)
+```
+
+```elixir
+p80 = Kino.Input.read(p80_input)
+f80 = Kino.Input.read(f80_input)
+
+bond_results = Enum.map(grinding_data, fn mat ->
+  b = EnergyX.IndustrialProcesses.HeavyIndustry.bond_grinding(%{
+        wi_kwh_t: mat.wi, f80_micron: f80, p80_micron: p80})
+  %{"Material"         => mat.material,
+    "Work Index (kWh/t)" => mat.wi,
+    "Grinding Energy (kWh/t)" => b.specific_energy_kwh_t,
+    "Reduction Ratio"  => b.reduction_ratio}
+end)
+
+Kino.DataTable.new(bond_results)
+```
+
+```elixir
+# Grinding energy vs product size (limestone)
+grind_data =
+  Enum.map([10, 25, 50, 100, 200, 500, 1000, 2000], fn p80_val ->
+    b = EnergyX.IndustrialProcesses.HeavyIndustry.bond_grinding(%{
+          wi_kwh_t: 10.2, f80_micron: 50_000.0, p80_micron: p80_val * 1.0})
+    %{"P₈₀ (μm)" => p80_val, "Energy (kWh/t)" => b.specific_energy_kwh_t}
+  end)
+
+Vl.new(width: 600, height: 300, title: "Bond's Law — Grinding Energy vs Product Size (Limestone, F₈₀=50mm)")
+|> Vl.data_from_values(grind_data)
+|> Vl.mark(:line, color: "#833C00", stroke_width: 2.5, point: true)
+|> Vl.encode_field(:x, "P₈₀ (μm)", type: :quantitative, scale: [type: "log"])
+|> Vl.encode_field(:y, "Energy (kWh/t)", type: :quantitative)
+|> Kino.VegaLite.new()
+```
+
+## 5. ISO 50001 Energy Baseline & Audit
+
+```elixir
+historical = [
+  %{year: 2019, energy_kwh: 12_500_000, production_units: 85_000},
+  %{year: 2020, energy_kwh: 11_800_000, production_units: 78_000},
+  %{year: 2021, energy_kwh: 13_200_000, production_units: 91_000},
+  %{year: 2022, energy_kwh: 12_900_000, production_units: 89_000},
+  %{year: 2023, energy_kwh: 13_500_000, production_units: 95_000},
+]
+
+baseline = EnergyX.EnergyAudit.energy_baseline(%{
+  historical_data: historical, improvement_target_pct: 3.0})
+
+IO.puts("""
+ISO 50001 Energy Baseline:
+  EnPI formula: #{baseline.formula}
+  Average EI:   #{baseline.avg_energy_intensity} kWh/unit
+  Target EI:    #{baseline.target_energy_intensity} kWh/unit (−3%/yr)
+""")
+
+IO.puts("\nStandard Energy Saving Opportunities (sorted by payback):")
+opps = EnergyX.EnergyAudit.standard_opportunities()
+|> Enum.map(fn o ->
+  %{"Category" => o.category, "Measure" => o.measure,
+    "Typical Saving (%)" => o.typical_saving_pct,
+    "Payback (yr)" => o.payback_yr}
+end)
+
+Kino.DataTable.new(opps)
+```
+
+---
+
+*📘 Continue to Notebook 08 — Economics & Project Finance*
